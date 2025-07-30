@@ -1,4 +1,6 @@
-#patch = { crates-io = { wiremock = { path = "/home/john/git/wiremock" } } }
+[patch.crates-io]
+schemars = {git = "https://github.com/howardjohn/schemars", rev = "4364354fa41897a0c2001d891c0a9a38eafedb82"}
+
 [workspace]
 resolver = "2"
 members = [
@@ -9,6 +11,7 @@ members = [
     "crates/hbone",
     "crates/mock-server",
     "crates/xds",
+    "crates/xtask",
 ]
 default-members = [
     "crates/a2a-sdk",
@@ -101,11 +104,11 @@ pprof = { version = "0.15", features = [
 ] }
 pretty_env_logger = "0.5"
 prometheus-client = "0.23"
-prost = "0.13"
-prost-build = "0.13"
-prost-types = "0.13"
+prost = "0.14"
+prost-build = "0.14"
+prost-types = "0.14"
 rand = "0.9"
-rcgen = "0.13"
+rcgen = "0.14"
 regex = "1.11"
 reqwest = { version = "0.12", default-features = false, features = [
     "http2",
@@ -113,7 +116,7 @@ reqwest = { version = "0.12", default-features = false, features = [
     "macos-system-configuration",
     "rustls-tls",
 ] }
-rmcp = { version = "0.2.0", features = [
+rmcp = { version = "0.3", features = [
     "client",
     "transport-sse-server",
     "transport-sse-client",
@@ -128,20 +131,22 @@ rustls = { version = "0.23", features = ["tls12", "ring"] }
 rustls-native-certs = "0.8"
 rustls-pemfile = "2.2"
 rustls-pki-types = "1.12"
-schemars = { version = "1.0", git = "https://github.com/howardjohn/schemars", rev = "eec69888dd2048f7f9ccdb15a32cf584f9b3edf5", features = [
+schemars = { version = "=1.0.4", git = "https://github.com/howardjohn/schemars", rev = "4364354fa41897a0c2001d891c0a9a38eafedb82", features = [
+#schemars = { version = "1.0", features = [
     "bytes1",
     "arcstr1",
     "raw_value",
+    "preserve_order",
 ] }
 secrecy = { version = "0.10", features = ["serde"] }
 serde = { version = "1.0", features = ["derive", "rc"] }
 serde-transcode = "1.1"
-serde_json = "1.0"
+serde_json = { version = "1.0", features = ["preserve_order"] }
 serde_json_path_to_error = "0.1"
 serde_regex = "1.1"
 serde_yaml = "0.9"
 shellexpand = "3.1"
-socket2 = "0.5"
+socket2 = "0.6"
 split-iter = "0.1"
 sse-stream = "0.2"
 tempfile = "3.20"
@@ -153,8 +158,10 @@ tokio-stream = { version = "0.1", features = ["net", "sync"] }
 tokio-test = "0.4"
 tokio-util = { version = "0.7", features = ["codec"] }
 tokio_sse_codec = "0.0.2"
-tonic = { version = "0.13", features = ["prost", "codegen", "transport"] }
-tonic-build = { version = "0.13", features = ["prost", "transport"] }
+tonic = { version = "0.14", features = ["codegen", "transport"] }
+tonic-prost = { version = "0.14" }
+tonic-prost-build = { version = "0.14", features = ["transport"] }
+tonic-build = { version = "0.14", features = ["transport"] }
 tower = { version = "0.5" }
 tower-http = { version = "0.6", features = ["cors"] }
 tower-serve-static = "0.1"
@@ -172,6 +179,17 @@ url = "2.5"
 wiremock = "0.6.3"
 x509-parser = "0.17"
 which = "8.0.0"
+cel-interpreter = { git = "https://github.com/clarkmcc/cel-rust", rev = "5b02b08" }
+cel-parser = { git = "https://github.com/clarkmcc/cel-rust", rev = "5b02b08" }
+crossbeam-channel = "0.5"
+http-serde = "2.1"
+itoa = "1.0"
+serde_urlencoded = "0.7"
+serde_with = { version = "3.14", features = ["schemars_1", "macros", "alloc"], default-features = false }
+value-bag = { version = "1.11", features = ["serde"] }
+time = "0.3"
+tikv-jemallocator = { version = "0.6", features = ["profiling", "unprefixed_malloc_on_supported_platforms"] }
+jemalloc_pprof = { version = "0.8"}
 
 # Release optimized but without as many dependencies, suitable for incremental development
 [profile.quick-release]

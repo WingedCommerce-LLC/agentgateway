@@ -153,8 +153,10 @@ struct Jwk {
 }
 
 #[derive(Clone, Debug, Default)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 pub struct Claims {
 	pub inner: Map<String, Value>,
+	#[cfg_attr(feature = "schema", schemars(skip))]
 	pub jwt: SecretString,
 }
 
@@ -181,6 +183,7 @@ impl Jwt {
 		if let Some(serde_json::Value::String(sub)) = claims.inner.get("sub") {
 			log.jwt_sub = Some(sub.to_string());
 		};
+		log.cel.ctx().with_jwt(&claims);
 		// Remove the token. TODO: allow keep it
 		req.headers_mut().remove(http::header::AUTHORIZATION);
 		// Insert the claims into extensions so we can reference it later

@@ -13,14 +13,13 @@ use crate::llm::anthropic::types::{
 use crate::llm::universal::{ChatCompletionChoiceStream, ChatCompletionRequest, Usage};
 use crate::llm::{AIError, LLMRequest, LLMResponse, universal};
 use crate::telemetry::log::AsyncLog;
-use crate::*;
-use crate::{llm, parse};
+use crate::{llm, parse, *};
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 pub struct Provider {
 	#[serde(default, skip_serializing_if = "Option::is_none")]
-	model: Option<Strng>,
+	pub model: Option<Strng>,
 }
 
 impl super::Provider for Provider {

@@ -55,7 +55,7 @@ export function BackendConfig() {
   const handleAddBackend = async () => {
     await addBackend(backendForm, selectedBackendType, editingBackend, () => {
       loadBackends();
-      resetBackendForm();
+      resetBackendForm(binds);
       closeDialogs();
     });
   };
@@ -73,7 +73,7 @@ export function BackendConfig() {
 
   const handleCancel = () => {
     closeDialogs();
-    resetBackendForm();
+    resetBackendForm(binds);
   };
 
   if (isLoading) {
@@ -88,7 +88,10 @@ export function BackendConfig() {
   return (
     <div className="space-y-6">
       <div className="flex justify-end">
-        <Button onClick={openAddDialog}>
+        <Button onClick={() => {
+          resetBackendForm(binds);
+          openAddDialog();
+        }}>
           <Plus className="mr-2 h-4 w-4" />
           Add Backend
         </Button>
@@ -115,7 +118,12 @@ export function BackendConfig() {
 
       <AddBackendDialog
         open={isAddBackendDialogOpen}
-        onOpenChange={setIsAddBackendDialogOpen}
+        onOpenChange={(open) => {
+          if (!open) {
+            handleCancel();
+          }
+          setIsAddBackendDialogOpen(open);
+        }}
         binds={binds}
         backendForm={backendForm}
         setBackendForm={setBackendForm}

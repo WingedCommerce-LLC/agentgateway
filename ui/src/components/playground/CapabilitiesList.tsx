@@ -1,7 +1,7 @@
 "use client";
 
 import { Tool as McpTool } from "@modelcontextprotocol/sdk/types.js";
-import { AgentSkill } from "@/lib/a2a-schema";
+import type { AgentSkill } from "@a2a-js/sdk";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import {
   Table,
@@ -40,7 +40,7 @@ export function CapabilitiesList({
   const loadingMessage = `Loading ${title}...`;
 
   return (
-    <Card className="flex flex-col">
+    <Card className="flex flex-col" data-cy="capabilities-list">
       <CardHeader>
         <CardTitle>Available {title}</CardTitle>
         <CardDescription>{description}</CardDescription>
@@ -72,6 +72,7 @@ export function CapabilitiesList({
                       key={tool.name}
                       className={`cursor-pointer hover:bg-muted/50 ${selectedMcpToolName === tool.name ? "bg-muted" : ""}`}
                       onClick={() => onMcpToolSelect(tool)}
+                      data-cy={`tool-row-${tool.name}`}
                     >
                       <TableCell className="font-medium">{tool.name}</TableCell>
                       <TableCell>{tool.description}</TableCell>
@@ -83,6 +84,7 @@ export function CapabilitiesList({
                       key={skill.id}
                       className={`cursor-pointer hover:bg-muted/50 ${selectedA2aSkillId === skill.id ? "bg-muted" : ""}`}
                       onClick={() => onA2aSkillSelect(skill)}
+                      data-cy={`skill-row-${skill.id}`}
                     >
                       <TableCell className="font-medium">{skill.name}</TableCell>
                       <TableCell>{skill.description || "-"}</TableCell>

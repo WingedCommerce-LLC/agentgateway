@@ -1,6 +1,26 @@
+use std::collections::HashMap;
+use std::convert::Infallible;
+use std::io::Cursor;
+use std::net::SocketAddr;
+use std::path::PathBuf;
+use std::str::FromStr;
+
+use agent_core::prelude::Strng;
+use anyhow::{Error, anyhow, bail};
+use itertools::Itertools;
+use jsonwebtoken::jwk::{AlgorithmParameters, JwkSet, KeyAlgorithm};
+use jsonwebtoken::{DecodingKey, Validation};
+use macro_rules_attribute::{apply, attribute_alias};
+use openapiv3::OpenAPI as OpenAPIv3;
+use rmcp::handler::server::router::tool::CallToolHandlerExt;
+use rustls::{ClientConfig, ServerConfig};
+use serde::de::DeserializeOwned;
+use serde_with::{TryFromInto, serde_as};
+
 use crate::http::auth::BackendAuth;
 use crate::http::backendtls::{BackendTLS, LocalBackendTLS};
 use crate::http::jwt::{JwkError, Jwt};
+use crate::http::remoteratelimit::Descriptor;
 use crate::http::{filters, retry, timeout};
 use crate::llm::AIProvider;
 use crate::store::LocalWorkload;
@@ -9,27 +29,18 @@ use crate::types::agent::PolicyTarget::RouteRule;
 use crate::types::agent::{
 	A2aPolicy, Backend, BackendName, BackendReference, Bind, BindName, GatewayName, Listener,
 	ListenerKey, ListenerProtocol, ListenerSet, McpAuthentication, McpAuthorization, McpBackend,
-	PathMatch, Policy, PolicyTarget, Route, RouteBackend, RouteBackendReference, RouteFilter,
-	RouteMatch, RouteName, RouteRuleName, RouteSet, SimpleBackend, SimpleBackendReference, TCPRoute,
+	McpTarget, McpTargetName, McpTargetSpec, OpenAPITarget, PathMatch, Policy, PolicyTarget, Route,
+	RouteBackend, RouteBackendReference, RouteFilter, RouteMatch, RouteName, RouteRuleName, RouteSet,
+	SimpleBackend, SimpleBackendReference, SseTargetSpec, StreamableHTTPTargetSpec, TCPRoute,
 	TCPRouteBackendReference, TCPRouteSet, TLSConfig, Target, TargetedPolicy, TrafficPolicy,
 	parse_cert, parse_key,
 };
 use crate::types::discovery::{NamespacedHostname, Service};
 use crate::*;
-use agent_core::prelude::Strng;
-use anyhow::{Error, anyhow, bail};
-use itertools::Itertools;
-use jsonwebtoken::jwk::{AlgorithmParameters, JwkSet, KeyAlgorithm};
-use jsonwebtoken::{DecodingKey, Validation};
-use rmcp::handler::server::router::tool::CallToolHandlerExt;
-use rustls::{ClientConfig, ServerConfig};
-use serde::de::DeserializeOwned;
-use serde_with::serde_as;
-use std::collections::HashMap;
-use std::io::Cursor;
-use std::net::SocketAddr;
-use std::path::PathBuf;
-use std::str::FromStr;
+
+attribute_alias! {
+		#[apply(schema!)] = #[serde_as] #[derive(Debug, Clone, serde::Deserialize)] #[serde(rename_all = "camelCase", deny_unknown_fields)] #[cfg_attr(feature = "schema", derive(JsonSchema))];
+}
 
 impl NormalizedLocalConfig {
 	pub async fn from(client: client::Client, s: &str) -> anyhow::Result<NormalizedLocalConfig> {
@@ -53,18 +64,11 @@ pub struct NormalizedLocalConfig {
 	pub services: Vec<Service>,
 }
 
-#[cfg(feature = "schema")]
-pub fn generate_schema() -> String {
-	let settings = schemars::generate::SchemaSettings::default().with(|s| s.inline_subschemas = true);
-	let gens = schemars::SchemaGenerator::new(settings);
-	let schema = gens.into_root_schema_for::<LocalConfig>();
-	serde_json::to_string_pretty(&schema).unwrap()
-}
-
-#[derive(Debug, Clone, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-#[cfg_attr(feature = "schema", derive(JsonSchema))]
-struct LocalConfig {
+#[apply(schema!)]
+pub struct LocalConfig {
+	#[serde(default)]
+	#[cfg_attr(feature = "schema", schemars(with = "RawConfig"))]
+	config: Arc<Option<serde_json::value::Value>>,
 	#[serde(default)]
 	binds: Vec<LocalBind>,
 	#[serde(default)]
@@ -75,17 +79,13 @@ struct LocalConfig {
 	services: Vec<Service>,
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-#[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[apply(schema!)]
 struct LocalBind {
 	port: u16,
 	listeners: Vec<LocalListener>,
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-#[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[apply(schema!)]
 struct LocalListener {
 	// User facing name
 	name: Option<Strng>,
@@ -121,9 +121,7 @@ struct LocalTLSServerConfig {
 	key: PathBuf,
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-#[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[apply(schema!)]
 struct LocalRoute {
 	#[serde(default, skip_serializing_if = "Option::is_none", rename = "name")]
 	// User facing name of the route
@@ -142,9 +140,7 @@ struct LocalRoute {
 	backends: Vec<LocalRouteBackend>,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-#[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[apply(schema!)]
 pub struct LocalRouteBackend {
 	#[serde(default = "default_weight")]
 	pub weight: usize,
@@ -159,9 +155,7 @@ fn default_weight() -> usize {
 	1
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-#[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[apply(schema!)]
 pub enum LocalBackend {
 	// This one is a reference
 	Service {
@@ -173,23 +167,129 @@ pub enum LocalBackend {
 	Opaque(Target), // Hostname or IP
 	Dynamic {},
 	#[serde(rename = "mcp")]
-	MCP(McpBackend),
+	MCP(LocalMcpBackend),
 	#[serde(rename = "ai")]
 	AI(crate::llm::AIBackend),
 	Invalid,
 }
 
 impl LocalBackend {
-	pub fn as_backend(&self, name: BackendName) -> Option<Backend> {
+	pub fn as_backends(&self, name: BackendName) -> Vec<Backend> {
 		match self {
-			LocalBackend::Service { .. } => None, // These stay as references
-			LocalBackend::Opaque(tgt) => Some(Backend::Opaque(name, tgt.clone())),
-			LocalBackend::Dynamic { .. } => Some(Backend::Dynamic {}),
-			LocalBackend::MCP(tgt) => Some(Backend::MCP(name, tgt.clone())),
-			LocalBackend::AI(tgt) => Some(Backend::AI(name, tgt.clone())),
-			LocalBackend::Invalid => Some(Backend::Invalid),
+			LocalBackend::Service { .. } => vec![], // These stay as references
+			LocalBackend::Opaque(tgt) => vec![Backend::Opaque(name, tgt.clone())],
+			LocalBackend::Dynamic { .. } => vec![Backend::Dynamic {}],
+			LocalBackend::MCP(tgt) => {
+				let mut targets = vec![];
+				let mut backends = vec![];
+				for (idx, t) in tgt.targets.iter().enumerate() {
+					let spec = match t.spec.clone() {
+						LocalMcpTargetSpec::Sse { backend, path } => {
+							let name = strng::format!("mcp/{}/{}", name.clone(), idx);
+							let (bref, be) = to_simple_backend_and_ref(name, &backend);
+							be.into_iter().for_each(|b| backends.push(b));
+							McpTargetSpec::Sse(SseTargetSpec {
+								backend: bref,
+								path: path.clone(),
+							})
+						},
+						LocalMcpTargetSpec::Mcp { backend, path } => {
+							let name = strng::format!("mcp/{}/{}", name.clone(), idx);
+							let (bref, be) = to_simple_backend_and_ref(name, &backend);
+							be.into_iter().for_each(|b| backends.push(b));
+							McpTargetSpec::Mcp(StreamableHTTPTargetSpec {
+								backend: bref,
+								path: path.clone(),
+							})
+						},
+						LocalMcpTargetSpec::Stdio { cmd, args, env } => McpTargetSpec::Stdio { cmd, args, env },
+						LocalMcpTargetSpec::OpenAPI { backend, schema } => {
+							let name = strng::format!("mcp/{}/{}", name.clone(), idx);
+							let (bref, be) = to_simple_backend_and_ref(name.clone(), &backend);
+							be.into_iter().for_each(|b| backends.push(b));
+							McpTargetSpec::OpenAPI(OpenAPITarget {
+								backend: bref,
+								schema,
+							})
+						},
+					};
+					let t = McpTarget {
+						name: t.name.clone(),
+						spec,
+					};
+					targets.push(Arc::new(t));
+				}
+				let m = McpBackend { targets };
+				backends.push(Backend::MCP(name, m));
+				backends
+			},
+			LocalBackend::AI(tgt) => vec![Backend::AI(name, tgt.clone())],
+			LocalBackend::Invalid => vec![Backend::Invalid],
 		}
 	}
+}
+
+#[apply(schema!)]
+pub struct LocalMcpBackend {
+	pub targets: Vec<Arc<LocalMcpTarget>>,
+}
+
+#[apply(schema!)]
+pub struct LocalMcpTarget {
+	pub name: McpTargetName,
+	#[serde(flatten)]
+	pub spec: LocalMcpTargetSpec,
+}
+
+#[apply(schema!)]
+pub struct McpBackendHost {
+	pub host: String,
+	pub port: u16,
+}
+
+impl TryFrom<McpBackendHost> for SimpleLocalBackend {
+	type Error = anyhow::Error;
+	fn try_from(value: McpBackendHost) -> Result<Self, Self::Error> {
+		Ok(SimpleLocalBackend::Opaque(Target::try_from((
+			value.host.as_str(),
+			value.port,
+		))?))
+	}
+}
+
+#[apply(schema!)]
+pub enum LocalMcpTargetSpec {
+	#[serde(rename = "sse")]
+	Sse {
+		#[serde(flatten)]
+		#[serde_as(deserialize_as = "TryFromInto<McpBackendHost>")]
+		backend: SimpleLocalBackend,
+		path: String,
+	},
+	#[serde(rename = "mcp")]
+	Mcp {
+		#[serde(flatten)]
+		#[serde_as(deserialize_as = "TryFromInto<McpBackendHost>")]
+		backend: SimpleLocalBackend,
+		path: String,
+	},
+	#[serde(rename = "stdio")]
+	Stdio {
+		cmd: String,
+		#[serde(default, skip_serializing_if = "Vec::is_empty")]
+		args: Vec<String>,
+		#[serde(default, skip_serializing_if = "HashMap::is_empty")]
+		env: HashMap<String, String>,
+	},
+	#[serde(rename = "openapi")]
+	OpenAPI {
+		#[serde(flatten)]
+		#[serde_as(deserialize_as = "TryFromInto<McpBackendHost>")]
+		backend: SimpleLocalBackend,
+		#[serde(deserialize_with = "types::agent::de_openapi")]
+		#[cfg_attr(feature = "schema", schemars(with = "serde_json::value::RawValue"))]
+		schema: Arc<types::agent::OpenAPI>,
+	},
 }
 
 fn default_matches() -> Vec<RouteMatch> {
@@ -201,9 +301,7 @@ fn default_matches() -> Vec<RouteMatch> {
 	}]
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-#[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[apply(schema!)]
 struct LocalTCPRoute {
 	#[serde(default, skip_serializing_if = "Option::is_none", rename = "name")]
 	// User facing name of the route
@@ -220,18 +318,14 @@ struct LocalTCPRoute {
 	backends: Vec<LocalTCPRouteBackend>,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-#[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[apply(schema!)]
 pub struct LocalTCPRouteBackend {
 	#[serde(default = "default_weight")]
 	pub weight: usize,
 	pub backend: SimpleLocalBackend,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-#[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[apply(schema!)]
 pub enum SimpleLocalBackend {
 	Service {
 		name: NamespacedHostname,
@@ -251,67 +345,95 @@ impl SimpleLocalBackend {
 		}
 	}
 }
-#[serde_as]
-#[derive(Debug, Clone, serde::Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-#[cfg_attr(feature = "schema", derive(JsonSchema))]
+
+#[apply(schema!)]
 struct FilterOrPolicy {
 	// Filters. Keep in sync with RouteFilter
-	#[serde(default, skip_serializing_if = "Option::is_none")]
+	/// Headers to be modified in the request.
+	#[serde(default)]
 	request_header_modifier: Option<filters::HeaderModifier>,
-	#[serde(default, skip_serializing_if = "Option::is_none")]
+
+	/// Headers to be modified in the response.
+	#[serde(default)]
 	response_header_modifier: Option<filters::HeaderModifier>,
-	#[serde(default, skip_serializing_if = "Option::is_none")]
+
+	/// Directly respond to the request with a redirect.
+	#[serde(default)]
 	request_redirect: Option<filters::RequestRedirect>,
-	#[serde(default, skip_serializing_if = "Option::is_none")]
+
+	/// Modify the URL path or authority.
+	#[serde(default)]
 	url_rewrite: Option<filters::UrlRewrite>,
-	#[serde(default, skip_serializing_if = "Option::is_none")]
+
+	/// Mirror incoming requests to another destination.
+	#[serde(default)]
 	request_mirror: Option<LocalRequestMirror>,
-	#[serde(default, skip_serializing_if = "Option::is_none")]
+
+	/// Directly respond to the request with a static response.
+	#[serde(default)]
 	direct_response: Option<filters::DirectResponse>,
-	#[serde(default, skip_serializing_if = "Option::is_none")]
+
+	/// Handle CORS preflight requests and append configured CORS headers to applicable requests.
+	#[serde(default)]
 	cors: Option<http::cors::Cors>,
 
 	// Policy
-	#[serde(default, skip_serializing_if = "Option::is_none")]
+	/// Authorization policies for MCP access.
+	#[serde(default)]
 	mcp_authorization: Option<McpAuthorization>,
-	#[serde(default, skip_serializing_if = "Option::is_none")]
+	/// Authentication for MCP clients.
+	#[serde(default)]
 	mcp_authentication: Option<McpAuthentication>,
-	#[serde(default, skip_serializing_if = "Option::is_none")]
+	/// Mark this traffic as A2A to enable A2A processing and telemetry.
+	#[serde(default)]
 	a2a: Option<A2aPolicy>,
-	#[serde(default, skip_serializing_if = "Option::is_none")]
+	/// Mark this as LLM traffic to enable LLM processing.
+	#[serde(default)]
 	#[cfg_attr(feature = "schema", schemars(with = "serde_json::value::RawValue"))]
 	ai: Option<llm::Policy>,
-	#[serde(
-		rename = "backendTLS",
-		default,
-		skip_serializing_if = "Option::is_none"
-	)]
+	/// Send TLS to the backend.
+	#[serde(rename = "backendTLS", default)]
 	backend_tls: Option<http::backendtls::LocalBackendTLS>,
-	#[serde(default, skip_serializing_if = "Option::is_none")]
+	/// Authenticate to the backend.
+	#[serde(default)]
 	backend_auth: Option<BackendAuth>,
-	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	/// Rate limit incoming requests. State is kept local.
+	#[serde(default)]
 	#[cfg_attr(feature = "schema", schemars(with = "serde_json::value::RawValue"))]
 	local_rate_limit: Vec<crate::http::localratelimit::RateLimit>,
-	#[serde(default, skip_serializing_if = "Option::is_none")]
-	#[cfg_attr(feature = "schema", schemars(with = "serde_json::value::RawValue"))]
-	remote_rate_limit: Option<crate::http::remoteratelimit::RemoteRateLimit>,
-	#[serde(default, skip_serializing_if = "Option::is_none")]
+	/// Rate limit incoming requests. State is managed by a remote server.
+	#[serde(default)]
+	remote_rate_limit: Option<LocalRemoteRateLimit>,
+	/// Authenticate incoming JWT requests.
+	#[serde(default)]
 	jwt_auth: Option<crate::http::jwt::LocalJwtConfig>,
-	#[serde(default, skip_serializing_if = "Option::is_none")]
-	#[cfg_attr(feature = "schema", schemars(with = "serde_json::value::RawValue"))]
-	ext_authz: Option<crate::http::ext_authz::ExtAuthz>,
+	/// Authenticate incoming requests by calling an external authorization server.
+	#[serde(default)]
+	ext_authz: Option<LocalExtAuthz>,
+	/// Modify requests and responses
+	#[serde(default)]
+	#[serde_as(
+		deserialize_as = "Option<TryFromInto<http::transformation_cel::LocalTransformationConfig>>"
+	)]
+	// serde_as is supposed to generate this automatically; not sure why its failing...
+	#[cfg_attr(
+		feature = "schema",
+		schemars(
+			with = "serde_with::Schema::<Option<crate::http::transformation_cel::Transformation>, Option<TryFromInto<http::transformation_cel::LocalTransformationConfig>>>"
+		)
+	)]
+	transformations: Option<crate::http::transformation_cel::Transformation>,
 
 	// TrafficPolicy
-	#[serde(default, skip_serializing_if = "Option::is_none")]
+	/// Timeout requests that exceed the configured duration.
+	#[serde(default)]
 	timeout: Option<timeout::Policy>,
-	#[serde(default, skip_serializing_if = "Option::is_none")]
+	/// Retry matching requests.
+	#[serde(default)]
 	retry: Option<retry::Policy>,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-#[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[apply(schema!)]
 struct TCPFilterOrPolicy {
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	backend_tls: Option<LocalBackendTLS>,
@@ -319,6 +441,7 @@ struct TCPFilterOrPolicy {
 
 async fn convert(client: client::Client, i: LocalConfig) -> anyhow::Result<NormalizedLocalConfig> {
 	let LocalConfig {
+		config: _,
 		binds,
 		workloads,
 		services,
@@ -333,7 +456,7 @@ async fn convert(client: client::Client, i: LocalConfig) -> anyhow::Result<Norma
 			let (l, pol, backends) = convert_listener(client.clone(), bind_name.clone(), idx, l).await?;
 			all_policies.extend_from_slice(&pol);
 			all_backends.extend_from_slice(&backends);
-			ls.insert(l.key.clone(), l)
+			ls.insert(l)
 		}
 		let b = Bind {
 			key: bind_name,
@@ -470,7 +593,7 @@ async fn convert_route(
 		}
 	};
 
-	let (refs, mut external_backends): (Vec<_>, Vec<Option<Backend>>) = backends
+	let (refs, external_backends): (Vec<_>, Vec<Vec<Backend>>) = backends
 		.into_iter()
 		.map(|b| {
 			let bref = match &b.backend {
@@ -481,16 +604,17 @@ async fn convert_route(
 				LocalBackend::Invalid => BackendReference::Invalid,
 				_ => BackendReference::Backend(key.clone()),
 			};
-			let backend = b.backend.as_backend(bref.name());
+			let backends = b.backend.as_backends(bref.name());
 			let bref = RouteBackendReference {
 				weight: b.weight,
 				backend: bref,
 				filters: vec![],
 				// filters: b.filters,
 			};
-			(bref, backend)
+			(bref, backends)
 		})
 		.unzip();
+	let mut external_backends = external_backends.into_iter().flatten().collect_vec();
 	let mut be_pol = 0;
 	let mut backend_tgt = |p: Policy| {
 		if refs.len() != 1 {
@@ -527,6 +651,7 @@ async fn convert_route(
 			local_rate_limit,
 			remote_rate_limit,
 			jwt_auth,
+			transformations,
 			ext_authz,
 			timeout,
 			retry,
@@ -549,7 +674,9 @@ async fn convert_route(
 				backend: bref,
 				percentage: p.percentage,
 			};
-			external_backends.push(backend);
+			backend
+				.into_iter()
+				.for_each(|backend| external_backends.push(backend));
 			filters.push(RouteFilter::RequestMirror(pol));
 		}
 		if let Some(p) = direct_response {
@@ -582,14 +709,35 @@ async fn convert_route(
 		if let Some(p) = jwt_auth {
 			external_policies.push(tgt(Policy::JwtAuth(p.try_into(client.clone()).await?)))
 		}
+		if let Some(p) = transformations {
+			external_policies.push(tgt(Policy::Transformation(p)))
+		}
 		if let Some(p) = ext_authz {
-			external_policies.push(tgt(Policy::ExtAuthz(p)))
+			let (bref, backend) =
+				to_simple_backend_and_ref(strng::format!("{}/extauthz", key), &p.target);
+			let pol = http::ext_authz::ExtAuthz {
+				target: Arc::new(bref),
+				context: p.context,
+			};
+			backend
+				.into_iter()
+				.for_each(|backend| external_backends.push(backend));
+			external_policies.push(tgt(Policy::ExtAuthz(pol)))
 		}
 		if !local_rate_limit.is_empty() {
 			external_policies.push(tgt(Policy::LocalRateLimit(local_rate_limit)))
 		}
 		if let Some(p) = remote_rate_limit {
-			external_policies.push(tgt(Policy::RemoteRateLimit(p)))
+			let (bref, backend) =
+				to_simple_backend_and_ref(strng::format!("{}/ratelimit", key), &p.target);
+			let pol = http::remoteratelimit::RemoteRateLimit {
+				target: Arc::new(bref),
+				descriptors: p.descriptors,
+			};
+			backend
+				.into_iter()
+				.for_each(|backend| external_backends.push(backend));
+			external_policies.push(tgt(Policy::RemoteRateLimit(pol)))
 		}
 
 		if let Some(p) = timeout {
@@ -609,11 +757,7 @@ async fn convert_route(
 		backends: refs,
 		policies: Some(traffic_policy),
 	};
-	Ok((
-		route,
-		external_policies,
-		external_backends.into_iter().flatten().collect(),
-	))
+	Ok((route, external_policies, external_backends))
 }
 
 async fn convert_tcp_route(
@@ -726,11 +870,24 @@ fn convert_tls_server(tls: LocalTLSServerConfig) -> anyhow::Result<TLSConfig> {
 	})
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-#[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[apply(schema!)]
 pub struct LocalRequestMirror {
 	pub backend: SimpleLocalBackend,
 	// 0.0-1.0
 	pub percentage: f64,
+}
+
+#[apply(schema!)]
+pub struct LocalExtAuthz {
+	#[serde(flatten)]
+	pub target: SimpleLocalBackend,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub context: Option<HashMap<String, String>>, // TODO: gRPC vs HTTP, fail open, include body,
+}
+
+#[apply(schema!)]
+pub struct LocalRemoteRateLimit {
+	#[serde(flatten)]
+	pub target: SimpleLocalBackend,
+	pub descriptors: HashMap<String, Descriptor>,
 }

@@ -1,11 +1,3 @@
-use super::{LLMResponse, Provider as LLMProvider, universal};
-use crate::http::{Body, Request, Response};
-use crate::llm::bedrock::translate_error;
-use crate::llm::bedrock::types::ConverseErrorResponse;
-use crate::llm::universal::ChatCompletionRequest;
-use crate::llm::{AIError, AIProvider, LLMRequest};
-use crate::proxy::ProxyError;
-use crate::*;
 use agent_core::strng;
 use agent_core::strng::Strng;
 use anyhow::anyhow;
@@ -14,12 +6,21 @@ use serde_json::Value;
 use tiktoken_rs::CoreBPE;
 use tiktoken_rs::tokenizer::{Tokenizer, get_tokenizer};
 
+use super::{LLMResponse, Provider as LLMProvider, universal};
+use crate::http::{Body, Request, Response};
+use crate::llm::bedrock::translate_error;
+use crate::llm::bedrock::types::ConverseErrorResponse;
+use crate::llm::universal::ChatCompletionRequest;
+use crate::llm::{AIError, AIProvider, LLMRequest};
+use crate::proxy::ProxyError;
+use crate::*;
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 pub struct Provider {
 	#[serde(default, skip_serializing_if = "Option::is_none")]
-	model: Option<Strng>,
+	pub model: Option<Strng>,
 }
 
 impl super::Provider for Provider {

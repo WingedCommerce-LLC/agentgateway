@@ -1,26 +1,33 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use ::http::Request;
 use agent_xds::{RejectedConfig, XdsUpdate};
+use axum_core::body::Body;
 use futures_core::Stream;
 use itertools::Itertools;
 use serde::Serialize;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 use tracing::{Level, instrument};
 
+use crate::cel::ContextBuilder;
 use crate::http::auth::BackendAuth;
 use crate::http::backendtls::BackendTLS;
-use crate::http::{ext_authz, remoteratelimit};
+use crate::http::ext_proc::InferenceRouting;
+use crate::http::{ext_authz, ext_proc, remoteratelimit};
 use crate::mcp::rbac::{RuleSet, RuleSets};
+use crate::proxy::httpproxy::PolicyClient;
 use crate::store::Event;
 use crate::types::agent::{
-	A2aPolicy, Backend, BackendName, Bind, BindName, GatewayName, Listener, ListenerKey, ListenerSet,
-	McpAuthentication, Policy, PolicyName, PolicyTarget, Route, RouteKey, RouteName, TargetedPolicy,
+	A2aPolicy, Backend, BackendName, Bind, BindName, GatewayName, Listener, ListenerKey,
+	ListenerName, ListenerSet, McpAuthentication, Policy, PolicyName, PolicyTarget, Route, RouteKey,
+	RouteName, TargetedPolicy,
 };
 use crate::types::discovery::{NamespacedHostname, Service, Workload};
 use crate::types::proto::agent::resource::Kind as XdsKind;
 use crate::types::proto::agent::{
-	Bind as XdsBind, Listener as XdsListener, Resource as ADPResource, Route as XdsRoute,
+	Backend as XdsBackend, Bind as XdsBind, Listener as XdsListener, Policy as XdsPolicy,
+	Resource as ADPResource, Route as XdsRoute,
 };
 use crate::*;
 
@@ -30,8 +37,13 @@ pub struct Store {
 	by_name: HashMap<BindName, Arc<Bind>>,
 
 	policies_by_name: HashMap<PolicyName, Arc<TargetedPolicy>>,
+	policies_by_target: HashMap<PolicyTarget, HashSet<PolicyName>>,
 
 	backends_by_name: HashMap<BackendName, Arc<Backend>>,
+
+	// Listeners we got before a Bind arrived
+	staged_listeners: HashMap<BindName, HashMap<ListenerKey, Listener>>,
+	staged_routes: HashMap<ListenerKey, HashMap<RouteKey, Route>>,
 
 	tx: tokio::sync::broadcast::Sender<Event<Arc<Bind>>>,
 }
@@ -44,6 +56,7 @@ pub struct BackendPolicies {
 	// bool represents "should use default settings for provider"
 	pub llm_provider: Option<(llm::AIProvider, bool)>,
 	pub llm: Option<llm::Policy>,
+	pub inference_routing: Option<InferenceRouting>,
 }
 
 impl BackendPolicies {
@@ -55,6 +68,15 @@ impl BackendPolicies {
 			a2a: other.a2a.or(self.a2a),
 			llm: other.llm.or(self.llm),
 			llm_provider: other.llm_provider.or(self.llm_provider),
+			inference_routing: other.inference_routing.or(self.inference_routing),
+		}
+	}
+	/// build the inference routing configuration. This may be a NO-OP config.
+	pub fn build_inference(&self, client: PolicyClient) -> ext_proc::InferencePoolRouter {
+		if let Some(inference) = &self.inference_routing {
+			inference.build(client)
+		} else {
+			ext_proc::InferencePoolRouter::default()
 		}
 	}
 }
@@ -65,6 +87,18 @@ pub struct RoutePolicies {
 	pub remote_rate_limit: Option<remoteratelimit::RemoteRateLimit>,
 	pub jwt: Option<http::jwt::Jwt>,
 	pub ext_authz: Option<ext_authz::ExtAuthz>,
+	pub transformation: Option<http::transformation_cel::Transformation>,
+}
+
+impl RoutePolicies {
+	pub fn register_cel_expressions(&self, req: &http::Request, ctx: &mut ContextBuilder) {
+		let Some(xfm) = &self.transformation else {
+			return;
+		};
+		for expr in xfm.expressions() {
+			ctx.register_expression(expr)
+		}
+	}
 }
 
 impl From<RoutePolicies> for LLMRoutePolicies {
@@ -96,7 +130,10 @@ impl Store {
 		Self {
 			by_name: Default::default(),
 			policies_by_name: Default::default(),
+			policies_by_target: Default::default(),
 			backends_by_name: Default::default(),
+			staged_routes: Default::default(),
+			staged_listeners: Default::default(),
 			tx,
 		}
 	}
@@ -113,148 +150,96 @@ impl Store {
 		route: RouteName,
 		gateway: GatewayName,
 	) -> RoutePolicies {
-		let route_rule = PolicyTarget::RouteRule(route_rule);
-		let route = PolicyTarget::Route(route);
-		let gateway = PolicyTarget::Gateway(gateway);
 		// Changes we must do:
 		// * Index the store by the target
 		// * Avoid the N lookups, or at least the boilerplate, for each type
 		// Changes we may want to consider:
 		// * We do this lookup under one lock, but we will lookup backend rules and listener rules under a different
 		//   lock. This can lead to inconsistent state..
-		let local_rate_limit = self
-			// This is a terrible approach!
-			.policies_by_name
-			.values()
-			.filter_map(|p| {
-				let tgt = &p.target;
-				if !(tgt == &route || tgt == &route_rule || tgt == &gateway) {
-					return None;
-				}
-				match &p.policy {
-					Policy::LocalRateLimit(lrl) => Some(lrl.clone()),
-					_ => None,
-				}
-			})
-			.next();
-		let jwt = self
-			// This is a terrible approach!
-			.policies_by_name
-			.values()
-			.filter_map(|p| {
-				let tgt = &p.target;
-				if !(tgt == &route || tgt == &route_rule || tgt == &gateway) {
-					return None;
-				}
-				match &p.policy {
-					Policy::JwtAuth(lrl) => Some(lrl.clone()),
-					_ => None,
-				}
-			})
-			.next();
-		let ext_authz = self
-			// This is a terrible approach!
-			.policies_by_name
-			.values()
-			.filter_map(|p| {
-				let tgt = &p.target;
-				if !(tgt == &route || tgt == &route_rule || tgt == &gateway) {
-					return None;
-				}
-				match &p.policy {
-					Policy::ExtAuthz(lrl) => Some(lrl.clone()),
-					_ => None,
-				}
-			})
-			.next();
-		let remote_rate_limit = self
-			// This is a terrible approach!
-			.policies_by_name
-			.values()
-			.filter_map(|p| {
-				let tgt = &p.target;
-				if !(tgt == &route || tgt == &route_rule || tgt == &gateway) {
-					return None;
-				}
-				match &p.policy {
-					Policy::RemoteRateLimit(lrl) => Some(lrl.clone()),
-					_ => None,
-				}
-			})
-			.next();
-		RoutePolicies {
-			local_rate_limit: local_rate_limit.unwrap_or_default(),
-			remote_rate_limit,
-			jwt,
-			ext_authz,
+		let gateway = self.policies_by_target.get(&PolicyTarget::Gateway(gateway));
+		let route = self.policies_by_target.get(&PolicyTarget::Route(route));
+		let route_rule = self
+			.policies_by_target
+			.get(&PolicyTarget::RouteRule(route_rule));
+		let rules = route_rule
+			.iter()
+			.copied()
+			.flatten()
+			.chain(route.iter().copied().flatten())
+			.chain(gateway.iter().copied().flatten())
+			.filter_map(|n| self.policies_by_name.get(n));
+
+		let mut pol = RoutePolicies {
+			local_rate_limit: vec![],
+			remote_rate_limit: None,
+			jwt: None,
+			ext_authz: None,
+			transformation: None,
+		};
+		for rule in rules {
+			match &rule.policy {
+				Policy::LocalRateLimit(p) => {
+					if pol.local_rate_limit.is_empty() {
+						pol.local_rate_limit = p.clone();
+					}
+				},
+				Policy::ExtAuthz(p) => {
+					pol.ext_authz.get_or_insert_with(|| p.clone());
+				},
+				Policy::RemoteRateLimit(p) => {
+					pol.remote_rate_limit.get_or_insert_with(|| p.clone());
+				},
+				Policy::JwtAuth(p) => {
+					pol.jwt.get_or_insert_with(|| p.clone());
+				},
+				Policy::Transformation(p) => {
+					pol.transformation.get_or_insert_with(|| p.clone());
+				},
+				_ => {}, // others are not route policies
+			}
 		}
+
+		pol
 	}
 
 	pub fn backend_policies(&self, tgt: PolicyTarget) -> BackendPolicies {
-		let tls = self
-			// This is a terrible approach!
-			.policies_by_name
-			.values()
-			.filter_map(|p| {
-				if p.target != tgt {
-					return None;
-				};
-				match &p.policy {
-					Policy::BackendTLS(btls) => Some(btls.clone()),
-					_ => None,
-				}
-			})
-			.next();
-		let auth = self
-			// This is a terrible approach!
-			.policies_by_name
-			.values()
-			.filter_map(|p| {
-				if p.target != tgt {
-					return None;
-				};
-				match &p.policy {
-					Policy::BackendAuth(ba) => Some(ba.clone()),
-					_ => None,
-				}
-			})
-			.next();
-		let a2a = self
-			// This is a terrible approach!
-			.policies_by_name
-			.values()
-			.filter_map(|p| {
-				if p.target != tgt {
-					return None;
-				};
-				match &p.policy {
-					Policy::A2a(ba) => Some(ba.clone()),
-					_ => None,
-				}
-			})
-			.next();
-		let llm = self
-			// This is a terrible approach!
-			.policies_by_name
-			.values()
-			.filter_map(|p| {
-				if p.target != tgt {
-					return None;
-				};
-				match &p.policy {
-					Policy::AI(ba) => Some(ba.clone()),
-					_ => None,
-				}
-			})
-			.next();
-		BackendPolicies {
-			backend_tls: tls,
-			backend_auth: auth,
-			a2a,
-			llm,
+		let rules = self.policies_by_target.get(&tgt);
+		let rules = rules
+			.iter()
+			.copied()
+			.flatten()
+			.filter_map(|n| self.policies_by_name.get(n));
+
+		let mut pol = BackendPolicies {
+			backend_tls: None,
+			backend_auth: None,
+			a2a: None,
+			llm: None,
+			inference_routing: None,
 			// These are not attached policies but are represented in this struct for code organization
 			llm_provider: None,
+		};
+		for rule in rules {
+			match &rule.policy {
+				Policy::A2a(p) => {
+					pol.a2a.get_or_insert_with(|| p.clone());
+				},
+				Policy::BackendTLS(p) => {
+					pol.backend_tls.get_or_insert_with(|| p.clone());
+				},
+				Policy::BackendAuth(p) => {
+					pol.backend_auth.get_or_insert_with(|| p.clone());
+				},
+				Policy::AI(p) => {
+					pol.llm.get_or_insert_with(|| p.clone());
+				},
+				Policy::InferenceRouting(p) => {
+					pol.inference_routing.get_or_insert_with(|| p.clone());
+				},
+				_ => {},
+			}
 		}
+		pol
 	}
 
 	pub fn mcp_policies(&self, backend: BackendName) -> (RuleSets, Option<McpAuthentication>) {
@@ -322,7 +307,11 @@ impl Store {
         fields(bind),
     )]
 	pub fn remove_policy(&mut self, pol: PolicyName) {
-		if let Some(old) = self.policies_by_name.remove(&pol) {}
+		if let Some(old) = self.policies_by_name.remove(&pol) {
+			if let Some(o) = self.policies_by_target.get_mut(&old.target) {
+				o.remove(&pol);
+			}
+		}
 	}
 	#[instrument(
         level = Level::INFO,
@@ -367,10 +356,9 @@ impl Store {
 			return;
 		};
 		let mut bind = Arc::unwrap_or_clone(bind.clone());
-		let ln = listener.key.clone();
 		let mut lis = listener.clone();
 		lis.routes.remove(&route);
-		bind.listeners.insert(ln, lis);
+		bind.listeners.insert(lis);
 		self.insert_bind(bind);
 	}
 
@@ -380,8 +368,23 @@ impl Store {
         skip_all,
         fields(bind=%bind.key),
     )]
-	pub fn insert_bind(&mut self, bind: Bind) {
-		// TODO: handle update
+	pub fn insert_bind(&mut self, mut bind: Bind) {
+		debug!(bind=%bind.key, "insert bind");
+
+		// Insert any staged listeners
+		for (k, mut v) in self
+			.staged_listeners
+			.remove(&bind.key)
+			.into_iter()
+			.flatten()
+		{
+			debug!("adding staged listener {} to {}", k, bind.key);
+			for (rk, r) in self.staged_routes.remove(&k).into_iter().flatten() {
+				debug!("adding staged route {} to {}", rk, k);
+				v.routes.insert(r)
+			}
+			bind.listeners.insert(v)
+		}
 		let arc = Arc::new(bind);
 		self.by_name.insert(arc.key.clone(), arc.clone());
 		// ok to have no subs
@@ -389,7 +392,6 @@ impl Store {
 	}
 
 	pub fn insert_backend(&mut self, b: Backend) {
-		// TODO: handle update
 		let name = b.name();
 		let arc = Arc::new(b);
 		self.backends_by_name.insert(name, arc);
@@ -402,45 +404,70 @@ impl Store {
         fields(pol=%pol.name),
     )]
 	pub fn insert_policy(&mut self, pol: TargetedPolicy) {
-		// TODO: handle update
-		let arc = Arc::new(pol);
-		self.policies_by_name.insert(arc.name.clone(), arc.clone());
+		let pol = Arc::new(pol);
+		if let Some(old) = self.policies_by_name.insert(pol.name.clone(), pol.clone()) {
+			// Remove the old target. We may add it back, though.
+			if let Some(o) = self.policies_by_target.get_mut(&old.target) {
+				o.remove(&pol.name);
+			}
+		}
+		self
+			.policies_by_target
+			.entry(pol.target.clone())
+			.or_default()
+			.insert(pol.name.clone());
 	}
 
-	#[instrument(
-        level = Level::INFO,
-        name="insert_listener",
-        skip_all,
-        fields(listener=%lis.name,bind=%bind_name),
-    )]
-	pub fn insert_listener(&mut self, lis: Listener, bind_name: BindName) {
+	pub fn insert_listener(&mut self, mut lis: Listener, bind_name: BindName) {
+		debug!(listener=%lis.name,bind=%bind_name, "insert listener");
 		if let Some(b) = self.by_name.get(&bind_name) {
 			let mut bind = Arc::unwrap_or_clone(b.clone());
-			bind.listeners.insert(lis.key.clone(), lis);
+			// If this is a listener update, copy things over
+			if let Some(old) = bind.listeners.remove(&lis.key) {
+				debug!("listener update, copy old routes over");
+				lis.routes = Arc::unwrap_or_clone(old).routes;
+			}
+			// Insert any staged routes
+			for (k, v) in self.staged_routes.remove(&lis.key).into_iter().flatten() {
+				debug!("adding staged route {} to {}", k, lis.key);
+				lis.routes.insert(v)
+			}
+			bind.listeners.insert(lis);
 			self.insert_bind(bind);
 		} else {
-			warn!("no bind found");
+			// Insert any staged routes
+			for (k, v) in self.staged_routes.remove(&lis.key).into_iter().flatten() {
+				debug!("adding staged route {} to {}", k, lis.key);
+				lis.routes.insert(v)
+			}
+			debug!("no bind found, staging");
+			self
+				.staged_listeners
+				.entry(bind_name)
+				.or_default()
+				.insert(lis.key.clone(), lis);
 		}
 	}
-	#[instrument(
-        level = Level::INFO,
-        name="insert_route",
-        skip_all,
-        fields(listener=%ln,route=%r.key),
-    )]
+
 	pub fn insert_route(&mut self, r: Route, ln: ListenerKey) {
+		debug!(listener=%ln,route=%r.key, "insert route");
 		let Some((bind, lis)) = self
 			.by_name
 			.values()
 			.find_map(|l| l.listeners.get(&ln).map(|ls| (l, ls)))
 		else {
-			warn!("no listener found");
+			debug!(listener=%ln,route=%r.key, "no listener found, staging");
+			self
+				.staged_routes
+				.entry(ln)
+				.or_default()
+				.insert(r.key.clone(), r);
 			return;
 		};
 		let mut bind = Arc::unwrap_or_clone(bind.clone());
 		let mut lis = lis.clone();
 		lis.routes.insert(r);
-		bind.listeners.insert(ln, lis);
+		bind.listeners.insert(lis);
 		self.insert_bind(bind);
 	}
 
@@ -472,12 +499,19 @@ impl Store {
 			Some(XdsKind::Bind(w)) => self.insert_xds_bind(w),
 			Some(XdsKind::Listener(w)) => self.insert_xds_listener(w),
 			Some(XdsKind::Route(w)) => self.insert_xds_route(w),
+			Some(XdsKind::Backend(w)) => self.insert_xds_backend(w),
 			_ => Err(anyhow::anyhow!("unknown resource type")),
 		}
 	}
 
 	fn insert_xds_bind(&mut self, raw: XdsBind) -> anyhow::Result<()> {
-		let bind = Bind::try_from(&raw)?;
+		let mut bind = Bind::try_from(&raw)?;
+		// If XDS server pushes the same bind twice (which it shouldn't really do, but oh well),
+		// we need to copy the listeners over.
+		if let Some(old) = self.by_name.remove(&bind.key) {
+			debug!("bind update, copy old listeners over");
+			bind.listeners = Arc::unwrap_or_clone(old).listeners;
+		}
 		self.insert_bind(bind);
 		Ok(())
 	}
@@ -489,6 +523,16 @@ impl Store {
 	fn insert_xds_route(&mut self, raw: XdsRoute) -> anyhow::Result<()> {
 		let (route, listener_name): (Route, ListenerKey) = (&raw).try_into()?;
 		self.insert_route(route, listener_name);
+		Ok(())
+	}
+	fn insert_xds_backend(&mut self, raw: XdsBackend) -> anyhow::Result<()> {
+		let backend: (Backend) = (&raw).try_into()?;
+		self.insert_backend(backend);
+		Ok(())
+	}
+	fn insert_xds_policy(&mut self, raw: XdsPolicy) -> anyhow::Result<()> {
+		let policy: (TargetedPolicy) = (&raw).try_into()?;
+		self.insert_policy(policy);
 		Ok(())
 	}
 }

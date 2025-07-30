@@ -4,17 +4,15 @@ pub mod httpproxy;
 pub mod request_builder;
 pub mod tcpproxy;
 
-use crate::http::Body;
-use crate::http::HeaderValue;
-use crate::http::Response;
-use crate::http::StatusCode;
+pub use gateway::Gateway;
+use hyper_util_fork::client::legacy::Error as HyperError;
+
+use crate::http::{Body, HeaderValue, Response, StatusCode};
 use crate::types::agent::{
 	Backend, BackendReference, RouteBackend, RouteBackendReference, SimpleBackend,
 	SimpleBackendReference,
 };
 use crate::*;
-pub use gateway::Gateway;
-use hyper_util_fork::client::legacy::Error as HyperError;
 
 #[derive(thiserror::Error, Debug)]
 pub enum ProxyError {
@@ -36,6 +34,8 @@ pub enum ProxyError {
 	BackendUnsupportedMirror,
 	#[error("authentication failure: {0}")]
 	JwtAuthenticationFailure(http::jwt::TokenError),
+	#[error("transformation failed")]
+	TransformationFailure,
 	#[error("service not found")]
 	ServiceNotFound,
 	#[error("invalid backend type")]
@@ -85,6 +85,7 @@ impl ProxyError {
 			ProxyError::ServiceNotFound => StatusCode::INTERNAL_SERVER_ERROR,
 			ProxyError::BackendAuthenticationFailed(_) => StatusCode::INTERNAL_SERVER_ERROR,
 			ProxyError::InvalidBackendType => StatusCode::INTERNAL_SERVER_ERROR,
+			ProxyError::TransformationFailure => StatusCode::INTERNAL_SERVER_ERROR,
 
 			ProxyError::UpgradeFailed(_, _) => StatusCode::BAD_GATEWAY,
 

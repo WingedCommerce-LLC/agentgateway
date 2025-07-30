@@ -6,10 +6,12 @@ use std::io::Cursor;
 use std::marker::PhantomData;
 use std::net::{IpAddr, SocketAddr};
 use std::num::NonZeroU16;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::{cmp, net};
 
 use anyhow::anyhow;
+use duration_str::DError::ParseError;
 use indexmap::IndexMap;
 use itertools::Itertools;
 use once_cell::sync::Lazy;
@@ -18,7 +20,6 @@ use regex::Regex;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::{ClientConfig, ServerConfig};
 use rustls_pemfile::Item;
-
 use secrecy::SecretString;
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -28,12 +29,20 @@ use super::agent::*;
 use crate::http::auth::BackendAuth;
 use crate::http::jwt::Jwt;
 use crate::http::localratelimit::RateLimit;
-use crate::http::{HeaderName, HeaderValue, StatusCode, filters, retry, status, timeout, uri};
+use crate::http::{
+	HeaderName, HeaderValue, StatusCode, ext_proc, filters, localratelimit, retry, status, timeout,
+	uri,
+};
+use crate::llm::{AIBackend, AIProvider};
 use crate::mcp::rbac::RuleSet;
 use crate::transport::tls;
+use crate::types::agent::Backend::Opaque;
 use crate::types::discovery::NamespacedHostname;
 use crate::types::proto;
 use crate::types::proto::ProtoError;
+use crate::types::proto::agent::mcp_target::Protocol;
+use crate::types::proto::agent::policy_spec::ExternalAuth;
+use crate::types::proto::agent::policy_spec::local_rate_limit::Type;
 use crate::*;
 
 impl TryFrom<&proto::agent::TlsConfig> for TLSConfig {
@@ -59,22 +68,7 @@ impl TryFrom<&proto::agent::RouteBackend> for RouteBackendReference {
 	type Error = ProtoError;
 
 	fn try_from(s: &proto::agent::RouteBackend) -> Result<Self, Self::Error> {
-		let kind = match &s.kind {
-			None => BackendReference::Invalid,
-			Some(proto::agent::route_backend::Kind::Service(svc_key)) => {
-				let ns = match svc_key.split_once('/') {
-					Some((namespace, hostname)) => Ok(NamespacedHostname {
-						namespace: namespace.into(),
-						hostname: hostname.into(),
-					}),
-					None => Err(ProtoError::NamespacedHostnameParse(svc_key.clone())),
-				}?;
-				BackendReference::Service {
-					name: ns,
-					port: s.port as u16,
-				}
-			},
-		};
+		let kind = resolve_reference(s.backend.as_ref())?;
 		let filters = s
 			.filters
 			.iter()
@@ -203,6 +197,111 @@ impl TryFrom<&proto::agent::Route> for (Route, ListenerKey) {
 			policies: s.traffic_policy.map(TrafficPolicy::try_from).transpose()?,
 		};
 		Ok((r, strng::new(&s.listener_key)))
+	}
+}
+
+impl TryFrom<&proto::agent::Backend> for Backend {
+	type Error = ProtoError;
+
+	fn try_from(s: &proto::agent::Backend) -> Result<Self, Self::Error> {
+		let name = BackendName::from(&s.name);
+		Ok(match &s.kind {
+			Some(proto::agent::backend::Kind::Static(s)) => Backend::Opaque(
+				name,
+				Target::try_from((s.host.as_str(), s.port as u16))
+					.map_err(|e| ProtoError::Generic(e.to_string()))?,
+			),
+			Some(proto::agent::backend::Kind::Ai(a)) => Backend::AI(
+				name,
+				AIBackend {
+					host_override: a
+						.r#override
+						.as_ref()
+						.map(|o| {
+							Target::try_from((o.host.as_str(), o.port as u16))
+								.map_err(|e| ProtoError::Generic(e.to_string()))
+						})
+						.transpose()?,
+					provider: match &a.provider {
+						Some(proto::agent::ai_backend::Provider::Openai(openai)) => {
+							AIProvider::OpenAI(llm::openai::Provider {
+								model: openai.model.as_deref().map(strng::new),
+							})
+						},
+						Some(proto::agent::ai_backend::Provider::Gemini(gemini)) => {
+							AIProvider::Gemini(llm::gemini::Provider {
+								model: gemini.model.as_deref().map(strng::new),
+							})
+						},
+						Some(proto::agent::ai_backend::Provider::Vertex(vertex)) => {
+							AIProvider::Vertex(llm::vertex::Provider {
+								model: vertex.model.as_deref().map(strng::new),
+								region: Some(strng::new(&vertex.region)),
+								project_id: strng::new(&vertex.project_id),
+							})
+						},
+						Some(proto::agent::ai_backend::Provider::Anthropic(anthropic)) => {
+							AIProvider::Anthropic(llm::anthropic::Provider {
+								model: anthropic.model.as_deref().map(strng::new),
+							})
+						},
+						Some(proto::agent::ai_backend::Provider::Bedrock(bedrock)) => {
+							AIProvider::Bedrock(llm::bedrock::Provider {
+								model: strng::new(
+									bedrock
+										.model
+										.as_deref()
+										.ok_or_else(|| ProtoError::Generic("bedrock requires a model".to_string()))?,
+								),
+								region: strng::new(&bedrock.region),
+							})
+						},
+						None => {
+							return Err(ProtoError::Generic(
+								"AI backend provider is required".to_string(),
+							));
+						},
+					},
+				},
+			),
+			Some(proto::agent::backend::Kind::Mcp(m)) => Backend::MCP(
+				name,
+				McpBackend {
+					targets: m
+						.targets
+						.iter()
+						.map(|t| McpTarget::try_from(t).map(Arc::new))
+						.collect::<Result<Vec<_>, _>>()?,
+				},
+			),
+			_ => {
+				return Err(ProtoError::Generic("unknown backend".to_string()));
+			},
+		})
+	}
+}
+
+impl TryFrom<&proto::agent::McpTarget> for McpTarget {
+	type Error = ProtoError;
+
+	fn try_from(s: &proto::agent::McpTarget) -> Result<Self, Self::Error> {
+		let proto = proto::agent::mcp_target::Protocol::try_from(s.protocol)?;
+		let backend = resolve_simple_reference(s.backend.as_ref())?;
+		Ok(Self {
+			name: strng::new(&s.name),
+			spec: match proto {
+				Protocol::Sse => McpTargetSpec::Sse(SseTargetSpec {
+					backend,
+					path: "/sse".to_string(),
+				}),
+				Protocol::Undefined | Protocol::StreamableHttp => {
+					McpTargetSpec::Mcp(StreamableHTTPTargetSpec {
+						backend,
+						path: "/mcp".to_string(),
+					})
+				},
+			},
+		})
 	}
 }
 
@@ -346,26 +445,29 @@ impl TryFrom<&proto::agent::RouteFilter> for RouteFilter {
 				})
 			},
 			Some(proto::agent::route_filter::Kind::RequestMirror(m)) => {
+				let backend = resolve_simple_reference(m.backend.as_ref())?;
 				RouteFilter::RequestMirror(filters::RequestMirror {
-					backend: match &m.kind {
-						None => SimpleBackendReference::Invalid,
-						Some(proto::agent::request_mirror::Kind::Service(svc_key)) => {
-							let ns = match svc_key.split_once('/') {
-								Some((namespace, hostname)) => Ok(NamespacedHostname {
-									namespace: namespace.into(),
-									hostname: hostname.into(),
-								}),
-								None => Err(ProtoError::NamespacedHostnameParse(svc_key.clone())),
-							}?;
-							SimpleBackendReference::Service {
-								name: ns,
-								port: m.port as u16,
-							}
-						},
-					},
+					backend,
 					percentage: m.percentage / 100.0,
 				})
 			},
+			Some(proto::agent::route_filter::Kind::DirectResponse(m)) => {
+				RouteFilter::DirectResponse(filters::DirectResponse {
+					body: Bytes::copy_from_slice(&m.body),
+					status: StatusCode::from_u16(m.status as u16)?,
+				})
+			},
+			Some(proto::agent::route_filter::Kind::Cors(c)) => RouteFilter::CORS(
+				http::cors::Cors::try_from(http::cors::CorsSerde {
+					allow_credentials: c.allow_credentials,
+					allow_headers: c.allow_headers.clone(),
+					allow_methods: c.allow_methods.clone(),
+					allow_origins: c.allow_origins.clone(),
+					expose_headers: c.expose_headers.clone(),
+					max_age: c.max_age.map(|d| Duration::from_secs(d.seconds as u64)),
+				})
+				.map_err(|e| ProtoError::Generic(e.to_string()))?,
+			),
 		})
 	}
 }
@@ -376,4 +478,116 @@ fn default_as_none<T: Default + PartialEq>(i: T) -> Option<T> {
 	} else {
 		Some(i)
 	}
+}
+
+impl TryFrom<&proto::agent::Policy> for TargetedPolicy {
+	type Error = ProtoError;
+
+	fn try_from(s: &proto::agent::Policy) -> Result<Self, Self::Error> {
+		let name = PolicyName::from(&s.name);
+		let target = s.target.as_ref().ok_or(ProtoError::MissingRequiredField)?;
+		let spec = s.spec.as_ref().ok_or(ProtoError::MissingRequiredField)?;
+		let target = match &target.kind {
+			Some(proto::agent::policy_target::Kind::Gateway(v)) => PolicyTarget::Gateway(v.into()),
+			Some(proto::agent::policy_target::Kind::Listener(v)) => PolicyTarget::Listener(v.into()),
+			Some(proto::agent::policy_target::Kind::Route(v)) => PolicyTarget::Route(v.into()),
+			Some(proto::agent::policy_target::Kind::RouteRule(v)) => PolicyTarget::RouteRule(v.into()),
+			Some(proto::agent::policy_target::Kind::Backend(v)) => PolicyTarget::Backend(v.into()),
+			_ => return Err(ProtoError::EnumParse("unknown target kind".to_string())),
+		};
+		let policy = match &spec.kind {
+			Some(proto::agent::policy_spec::Kind::LocalRateLimit(lrl)) => {
+				let t = proto::agent::policy_spec::local_rate_limit::Type::try_from(lrl.r#type)?;
+				Policy::LocalRateLimit(vec![
+					localratelimit::RateLimitSerde {
+						max_tokens: lrl.max_tokens,
+						tokens_per_fill: lrl.tokens_per_fill,
+						fill_interval: lrl
+							.fill_interval
+							.ok_or(ProtoError::MissingRequiredField)?
+							.try_into()?,
+						limit_type: match t {
+							Type::Request => localratelimit::RateLimitType::Requests,
+							Type::Token => localratelimit::RateLimitType::Tokens,
+						},
+					}
+					.try_into()
+					.map_err(|e| ProtoError::Generic(format!("invalid rate limit: {e}")))?,
+				])
+			},
+			Some(proto::agent::policy_spec::Kind::ExtAuthz(ea)) => {
+				let target = resolve_simple_reference(ea.target.as_ref())?;
+				Policy::ExtAuthz(http::ext_authz::ExtAuthz {
+					target: Arc::new(target),
+					context: Some(ea.context.clone()),
+				})
+			},
+			Some(proto::agent::policy_spec::Kind::A2a(a2a)) => Policy::A2a(A2aPolicy {}),
+			Some(proto::agent::policy_spec::Kind::InferenceRouting(ir)) => {
+				Policy::InferenceRouting(ext_proc::InferenceRouting {
+					target: Arc::new(resolve_simple_reference(ir.endpoint_picker.as_ref())?),
+				})
+			},
+			_ => return Err(ProtoError::EnumParse("unknown spec kind".to_string())),
+		};
+		Ok(TargetedPolicy {
+			name,
+			target,
+			policy,
+		})
+	}
+}
+
+fn resolve_simple_reference(
+	target: Option<&proto::agent::BackendReference>,
+) -> Result<SimpleBackendReference, ProtoError> {
+	let Some(target) = target else {
+		return Ok(SimpleBackendReference::Invalid);
+	};
+	Ok(match target.kind.as_ref() {
+		None => SimpleBackendReference::Invalid,
+		Some(proto::agent::backend_reference::Kind::Service(svc_key)) => {
+			let ns = match svc_key.split_once('/') {
+				Some((namespace, hostname)) => Ok(NamespacedHostname {
+					namespace: namespace.into(),
+					hostname: hostname.into(),
+				}),
+				None => Err(ProtoError::NamespacedHostnameParse(svc_key.clone())),
+			}?;
+			SimpleBackendReference::Service {
+				name: ns,
+				port: target.port as u16,
+			}
+		},
+		Some(proto::agent::backend_reference::Kind::Backend(name)) => {
+			SimpleBackendReference::Backend(name.into())
+		},
+	})
+}
+
+fn resolve_reference(
+	target: Option<&proto::agent::BackendReference>,
+) -> Result<BackendReference, ProtoError> {
+	let Some(target) = target else {
+		return Ok(BackendReference::Invalid);
+	};
+	Ok(match target.kind.as_ref() {
+		None => BackendReference::Invalid,
+		Some(proto::agent::backend_reference::Kind::Service(svc_key)) => {
+			let ns = match svc_key.split_once('/') {
+				Some((namespace, hostname)) => Ok(NamespacedHostname {
+					namespace: namespace.into(),
+					hostname: hostname.into(),
+				}),
+				None => Err(ProtoError::NamespacedHostnameParse(svc_key.clone())),
+			}?;
+			BackendReference::Service {
+				name: ns,
+				port: target.port as u16,
+			}
+		},
+		Some(proto::agent::backend_reference::Kind::Backend(name)) => {
+			BackendReference::Backend(name.into())
+		},
+	})
 }

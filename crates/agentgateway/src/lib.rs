@@ -1,5 +1,6 @@
 // For now, the entire package is not linked up to anything so squash the warnings
 #![allow(unused)]
+use std::collections::BTreeMap;
 use std::fmt::{Debug, Display};
 use std::fs::File;
 use std::io::Read;
@@ -8,17 +9,17 @@ use std::sync::{Arc, RwLock};
 use std::{fmt, io};
 
 use agent_core::prelude::*;
+use control::caclient::CaClient;
 use hickory_resolver::config::{ResolverConfig, ResolverOpts};
+use indexmap::IndexMap;
+#[cfg(feature = "schema")]
+pub use schemars::JsonSchema;
 use serde::de::Visitor;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 pub use serdes::*;
 
-#[cfg(feature = "schema")]
-pub use schemars::JsonSchema;
-
 use crate::store::Stores;
 use crate::types::discovery::Identity;
-use control::caclient::CaClient;
 
 pub mod a2a;
 pub mod app;
@@ -57,11 +58,12 @@ pub struct NestedRawConfig {
 
 #[derive(serde::Deserialize, Default, Clone, Debug)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-/// RawConfig represents the inputs a user can pass in. Config represents the internal representation of this.
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+// RawConfig represents the inputs a user can pass in. Config represents the internal representation of this.
 pub struct RawConfig {
 	enable_ipv6: Option<bool>,
 
-	// Local XDS path. If not specified, the current configuration file will be used.
+	/// Local XDS path. If not specified, the current configuration file will be used.
 	local_xds_path: Option<PathBuf>,
 
 	ca_address: Option<String>,
@@ -73,11 +75,23 @@ pub struct RawConfig {
 	cluster_id: Option<String>,
 	network: Option<String>,
 
+	/// Admin UI address in the format "ip:port"
+	admin_addr: Option<String>,
+	/// Stats/metrics server address in the format "ip:port"
+	stats_addr: Option<String>,
+	/// Readiness probe server address in the format "ip:port"
+	readiness_addr: Option<String>,
+
 	auth_token: Option<String>,
 
+	#[serde(default, with = "serde_dur_option")]
+	#[cfg_attr(feature = "schema", schemars(with = "Option<String>"))]
 	connection_termination_deadline: Option<Duration>,
+	#[serde(default, with = "serde_dur_option")]
+	#[cfg_attr(feature = "schema", schemars(with = "Option<String>"))]
 	connection_min_termination_deadline: Option<Duration>,
 
+	#[cfg_attr(feature = "schema", schemars(with = "String"))]
 	worker_threads: Option<StringOrInt>,
 
 	tracing: Option<RawTracing>,
@@ -87,25 +101,46 @@ pub struct RawConfig {
 }
 
 #[derive(serde::Deserialize, Clone, Debug)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 pub struct RawHTTP2 {
 	window_size: Option<u32>,
 	connection_window_size: Option<u32>,
 	frame_size: Option<u32>,
 	pool_max_streams_per_conn: Option<u16>,
+	#[serde(deserialize_with = "serde_dur_option::deserialize")]
+	#[cfg_attr(feature = "schema", schemars(with = "Option<String>"))]
 	pool_unused_release_timeout: Option<Duration>,
 }
 
 #[derive(serde::Deserialize, Clone, Debug)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 pub struct RawTracing {
 	otlp_endpoint: String,
+	fields: Option<RawLoggingFields>,
 }
 
 #[derive(serde::Deserialize, Clone, Debug)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 pub struct RawLogging {
 	filter: Option<String>,
+	fields: Option<RawLoggingFields>,
+}
+
+#[derive(serde::Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+pub struct RawLoggingFields {
+	#[serde(default)]
+	remove: Vec<String>,
+	#[serde(default)]
+	#[cfg_attr(
+		feature = "schema",
+		schemars(with = "std::collections::HashMap<String, String>")
+	)]
+	add: IndexMap<String, String>,
 }
 
 #[derive(Clone, Debug)]
@@ -142,7 +177,7 @@ impl<'de> Deserialize<'de> for StringOrInt {
 }
 
 #[derive(serde::Serialize, Clone, Debug)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Config {
 	pub network: Strng,
 	#[serde(with = "serde_dur")]
@@ -164,10 +199,20 @@ pub struct Config {
 	pub logging: crate::telemetry::log::Config,
 	pub dns: client::Config,
 	pub proxy_metadata: ProxyMetadata,
+	pub threading_mode: ThreadingMode,
+}
+
+#[derive(serde::Serialize, Copy, PartialOrd, PartialEq, Eq, Clone, Debug, Default)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub enum ThreadingMode {
+	#[default]
+	Multithreaded,
+	// Experimental; do not use beyond testing
+	ThreadPerCore,
 }
 
 #[derive(serde::Serialize, Clone, Debug)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct XDSConfig {
 	/// XDS address to use. If unset, XDS will not be used.
 	pub address: Option<String>,
@@ -320,7 +365,7 @@ pub fn ipv6_enabled_on_localhost() -> io::Result<bool> {
 }
 
 #[derive(serde::Serialize, Clone, Debug)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ProxyMetadata {
 	pub instance_ip: String,
 	pub pod_name: String,

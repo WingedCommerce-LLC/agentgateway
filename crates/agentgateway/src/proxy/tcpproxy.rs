@@ -1,26 +1,30 @@
-use crate::client::Transport;
-use crate::http::Request;
-use crate::proxy::ProxyError;
-use crate::telemetry::log::RequestLog;
-use crate::transport::stream;
-use crate::transport::stream::{Socket, TCPConnectionInfo, TLSConnectionInfo};
-use crate::types::agent;
-use crate::types::agent::{
-	Backend, BackendReference, BindName, HeaderMatch, HeaderValueMatch, Listener, ListenerProtocol,
-	PathMatch, PolicyTarget, QueryValueMatch, Route, RouteBackend, RouteBackendReference,
-	SimpleBackend, SimpleBackendReference, TCPRoute, TCPRouteBackend, TCPRouteBackendReference,
-	Target,
-};
-use crate::types::discovery::NetworkAddress;
-use crate::types::discovery::gatewayaddress::Destination;
-use crate::{ProxyInputs, *};
+use std::collections::HashMap;
+use std::net::SocketAddr;
+use std::sync::Arc;
+
 use agent_core::strng;
 use anyhow::anyhow;
 use itertools::Itertools;
 use rand::prelude::IndexedRandom;
-use std::collections::HashMap;
-use std::net::SocketAddr;
-use std::sync::Arc;
+
+use crate::client::Transport;
+use crate::http::Request;
+use crate::proxy::ProxyError;
+use crate::telemetry::log;
+use crate::telemetry::log::{DropOnLog, RequestLog};
+use crate::telemetry::metrics::TCPLabels;
+use crate::transport::stream;
+use crate::transport::stream::{Socket, TCPConnectionInfo, TLSConnectionInfo};
+use crate::types::agent;
+use crate::types::agent::{
+	Backend, BackendReference, BindName, BindProtocol, HeaderMatch, HeaderValueMatch, Listener,
+	ListenerProtocol, PathMatch, PolicyTarget, QueryValueMatch, Route, RouteBackend,
+	RouteBackendReference, SimpleBackend, SimpleBackendReference, TCPRoute, TCPRouteBackend,
+	TCPRouteBackendReference, Target,
+};
+use crate::types::discovery::NetworkAddress;
+use crate::types::discovery::gatewayaddress::Destination;
+use crate::{ProxyInputs, *};
 
 #[derive(Clone)]
 pub struct TCPProxy {
@@ -32,10 +36,21 @@ pub struct TCPProxy {
 
 impl TCPProxy {
 	pub async fn proxy(&self, connection: Socket) {
-		let mut log: RequestLog = Default::default();
-		let ret = self.proxy_internal(connection, &mut log).await;
+		let start = Instant::now();
+
+		let tcp = connection
+			.ext::<TCPConnectionInfo>()
+			.expect("tcp connection must be set");
+		let mut log: DropOnLog = RequestLog::new(
+			log::CelLogging::new(self.inputs.cfg.logging.clone()),
+			self.inputs.metrics.clone(),
+			start,
+			tcp.clone(),
+		)
+		.into();
+		let ret = self.proxy_internal(connection, log.as_mut().unwrap()).await;
 		if let Err(e) = ret {
-			log.error = Some(e.to_string());
+			log.with(|l| l.error = Some(e.to_string()));
 		}
 	}
 
@@ -44,21 +59,33 @@ impl TCPProxy {
 		connection: Socket,
 		log: &mut RequestLog,
 	) -> Result<(), ProxyError> {
-		let start = Instant::now();
-		log.start = Some(start);
-		log.tcp_info = connection.ext::<TCPConnectionInfo>().cloned();
 		log.tls_info = connection.ext::<TLSConnectionInfo>().cloned();
+		self
+			.inputs
+			.metrics
+			.downstream_connection
+			.get_or_create(&TCPLabels {
+				bind: Some(&self.bind_name).into(),
+				gateway: Some(&self.selected_listener.gateway_name).into(),
+				listener: Some(&self.selected_listener.name).into(),
+				protocol: if log.tls_info.is_some() {
+					BindProtocol::tls
+				} else {
+					BindProtocol::tcp
+				},
+			})
+			.inc();
 		let sni = log
 			.tls_info
 			.as_ref()
 			.and_then(|tls| tls.server_name.as_deref());
-		// log.metrics = Some(self.inputs.metrics.clone());
 
 		let selected_listener = self.selected_listener.clone();
 		let upstream = self.inputs.upstream.clone();
 		let inputs = self.inputs.clone();
 		let bind_name = self.bind_name.clone();
 		debug!(bind=%bind_name, "route for bind");
+		log.bind_name = Some(bind_name.clone());
 		log.gateway_name = Some(selected_listener.gateway_name.clone());
 		log.listener_name = Some(selected_listener.name.clone());
 		debug!(bind=%bind_name, listener=%selected_listener.key, "selected listener");
