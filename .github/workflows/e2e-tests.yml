@@ -9,15 +9,15 @@ on:
 jobs:
   e2e-tests:
     runs-on: ubuntu-latest
-    
+
     strategy:
       matrix:
         node-version: [20]
-    
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-        
+
       - name: Setup Node.js ${{ matrix.node-version }}
         uses: actions/setup-node@v4
         with:
@@ -53,25 +53,41 @@ jobs:
           npm ci
           cd ui
           npm ci
-          
+
       - name: Build AgentGateway
         run: |
           cargo build --release --bin agentgateway
-          
+
       - name: Run E2E Tests
         run: |
-          # Skip full E2E tests in CI for now - they require running services
-          # Instead, run basic smoke tests to verify the test setup
-          echo "Skipping full E2E tests in CI environment"
-          echo "E2E tests require running AgentGateway backend and UI services"
-          echo "These should be run locally or in a dedicated E2E environment"
+          # Run E2E tests using the comprehensive test runner
+          echo "🚀 Running E2E tests in CI environment"
           
-          # Run basic test validation instead
-          cd ui
-          npm run cypress:run -- --spec "cypress/e2e/smoke/api-health.cy.ts" --config video=false || true
+          # Use the minimal test approach for CI to ensure reliability
+          echo "📋 Running minimal E2E test suite for CI validation..."
+          node scripts/test-e2e-minimal.js --verbose
+          
+          # If minimal tests pass, run a focused smoke test suite
+          if [ $? -eq 0 ]; then
+            echo "✅ Minimal tests passed, running smoke test suite..."
+            
+            # Use the comprehensive test runner with conservative settings for CI
+            chmod +x scripts/run-e2e-tests.sh
+            ./scripts/run-e2e-tests.sh \
+              --mode sequential \
+              --workers 1 \
+              --timeout 120 \
+              --no-auto-detect \
+              --verbose
+          else
+            echo "❌ Minimal tests failed, skipping full test suite"
+            exit 1
+          fi
         env:
           CI: true
-          
+          SKIP_BUILD: false
+          AGENTGATEWAY_BINARY: ./target/release/agentgateway
+
       - name: Upload test results
         uses: actions/upload-artifact@v4
         if: always()
@@ -93,11 +109,33 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
+      - name: Upload minimal test report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: minimal-test-report-node-${{ matrix.node-version }}
+          path: |
+            minimal-test-report.json
+            smart-defaults.json
+            .e2e-setup-config
+          retention-days: 7
+          if-no-files-found: ignore
+
+      - name: Upload test configuration
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-config-node-${{ matrix.node-version }}
+          path: |
+            test-config*.yaml
+          retention-days: 3
+          if-no-files-found: ignore
+
   e2e-tests-summary:
     runs-on: ubuntu-latest
     needs: e2e-tests
     if: always()
-    
+
     steps:
       - name: Check E2E test results
         run: |
