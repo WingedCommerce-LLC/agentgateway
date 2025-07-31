@@ -30,7 +30,7 @@ mod config_benchmarks {
                 match config_type {
                     "simple" => r#"
 config:
-  admin_addr: "127.0.0.1:15000"
+  admin_addr: "localhost:15000"
   stats_addr: "0.0.0.0:15020"
   readiness_addr: "0.0.0.0:15021"
   enable_ipv6: true
@@ -41,7 +41,7 @@ config:
 "#.to_string(),
                     "complex" => r#"
 config:
-  admin_addr: "127.0.0.1:15000"
+  admin_addr: "localhost:15000"
   stats_addr: "0.0.0.0:15020"
   readiness_addr: "0.0.0.0:15021"
   enable_ipv6: true
@@ -49,7 +49,7 @@ config:
   xds_address: "https://istiod.istio-system.svc:15010"
   namespace: "production"
   gateway: "production-gateway"
-  trust_domain: "cluster.local"
+  trust_domain: "cluster.example"
   service_account: "default"
   cluster_id: "Kubernetes"
   connection_min_termination_deadline: "5s"
@@ -78,7 +78,7 @@ config:
                     "multi_tenant" => {
                         let mut config = r#"
 config:
-  admin_addr: "127.0.0.1:15000"
+  admin_addr: "localhost:15000"
   stats_addr: "0.0.0.0:15020"
   readiness_addr: "0.0.0.0:15021"
   enable_ipv6: true
@@ -86,7 +86,7 @@ config:
   xds_address: "https://istiod.istio-system.svc:15010"
   namespace: "multi-tenant"
   gateway: "multi-tenant-gateway"
-  trust_domain: "cluster.local"
+  trust_domain: "cluster.example"
   service_account: "default"
   cluster_id: "Kubernetes"
   http2:
@@ -615,7 +615,7 @@ mod component_benchmarks {
                         }],
                         "backends": [{
                             "name": "default_backend",
-                            "address": "127.0.0.1:3000"
+                            "address": "localhost:3000"
                         }]
                     }),
                     "complex" => serde_json::json!({
@@ -651,12 +651,12 @@ mod component_benchmarks {
                         "backends": [
                             {
                                 "name": "api_backend",
-                                "address": "127.0.0.1:3000",
+                                "address": "localhost:3000",
                                 "health_check": {"path": "/health", "interval": "30s"}
                             },
                             {
                                 "name": "mcp_backend",
-                                "address": "127.0.0.1:3001",
+                                "address": "localhost:3001",
                                 "protocol": "mcp"
                             }
                         ],
@@ -697,7 +697,7 @@ mod component_benchmarks {
                                 }],
                                 "backends": [{
                                     "name": format!("tenant_{}_backend", i),
-                                    "address": format!("127.0.0.1:{}", 3000 + i)
+                                    "address": format!("localhost:{}", 3000 + i)
                                 }]
                             });
                         }
