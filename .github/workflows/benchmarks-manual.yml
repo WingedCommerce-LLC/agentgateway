@@ -136,6 +136,7 @@ jobs:
           cd crates/agentgateway/benches/traffic/reports
           
           # Run the enhanced baseline update system
+          # The script outputs GitHub Actions variables to stdout and logs to stderr
           python update-baselines.py >> $GITHUB_OUTPUT
   
   benchmark:

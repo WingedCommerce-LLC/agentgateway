@@ -103,7 +103,7 @@ class BaselineSourceManager:
             
             return {}
         except Exception as e:
-            print(f"Warning: Could not load current baselines: {e}")
+            print(f"Warning: Could not load current baselines: {e}", file=sys.stderr)
             return {}
     
     def check_all_sources(self) -> List[BaselineUpdate]:
@@ -112,12 +112,12 @@ class BaselineSourceManager:
         
         for source_name, source in self.sources.items():
             try:
-                print(f"Checking {source.name}...")
+                print(f"Checking {source.name}...", file=sys.stderr)
                 source_updates = self._check_source(source)
                 updates.extend(source_updates)
                 time.sleep(1)  # Rate limiting
             except Exception as e:
-                print(f"Error checking {source.name}: {e}")
+                print(f"Error checking {source.name}: {e}", file=sys.stderr)
         
         return updates
     
@@ -132,7 +132,7 @@ class BaselineSourceManager:
         elif source.source_type == 'api':
             return self._check_api_endpoint(source)
         else:
-            print(f"Unknown source type: {source.source_type}")
+            print(f"Unknown source type: {source.source_type}", file=sys.stderr)
             return []
     
     def _check_techempower(self, source: BaselineSource) -> List[BaselineUpdate]:
@@ -147,10 +147,10 @@ class BaselineSourceManager:
             # 3. Compare with current baselines
             # 4. Generate updates for significant changes
             
-            print(f"  TechEmpower check: No updates detected (placeholder)")
+            print(f"  TechEmpower check: No updates detected (placeholder)", file=sys.stderr)
             
         except Exception as e:
-            print(f"  TechEmpower check failed: {e}")
+            print(f"  TechEmpower check failed: {e}", file=sys.stderr)
         
         return updates
     
@@ -174,7 +174,7 @@ class BaselineSourceManager:
                 
                 # Check if it's performance-related
                 if any(keyword in title or keyword in summary for keyword in performance_keywords):
-                    print(f"  Found performance-related post: {entry.title}")
+                    print(f"  Found performance-related post: {entry.title}", file=sys.stderr)
                     
                     # In a real implementation, we would:
                     # 1. Fetch the full article
@@ -183,7 +183,7 @@ class BaselineSourceManager:
                     # 4. Compare with current baselines
                     
         except Exception as e:
-            print(f"  RSS feed check failed: {e}")
+            print(f"  RSS feed check failed: {e}", file=sys.stderr)
         
         return updates
     
@@ -209,7 +209,7 @@ class BaselineSourceManager:
                     
                     # Look for performance mentions
                     if any(keyword in body for keyword in ['performance', 'benchmark', 'faster', 'optimization']):
-                        print(f"  Found performance-related release: {release['tag_name']}")
+                        print(f"  Found performance-related release: {release['tag_name']}", file=sys.stderr)
                         
                         # In a real implementation, we would:
                         # 1. Parse the release notes for specific metrics
@@ -217,7 +217,7 @@ class BaselineSourceManager:
                         # 3. Update baselines accordingly
                         
         except Exception as e:
-            print(f"  GitHub releases check failed: {e}")
+            print(f"  GitHub releases check failed: {e}", file=sys.stderr)
         
         return updates
     
@@ -234,7 +234,7 @@ class BaselineSourceManager:
             data_hash = hashlib.md5(json.dumps(data, sort_keys=True).encode()).hexdigest()
             
             if source.last_hash and source.last_hash != data_hash:
-                print(f"  API data changed for {source.name}")
+                print(f"  API data changed for {source.name}", file=sys.stderr)
                 
                 # In a real implementation, we would:
                 # 1. Compare the old and new data
@@ -245,7 +245,7 @@ class BaselineSourceManager:
             source.last_checked = datetime.now().isoformat()
             
         except Exception as e:
-            print(f"  API endpoint check failed: {e}")
+            print(f"  API endpoint check failed: {e}", file=sys.stderr)
         
         return updates
 
@@ -257,15 +257,15 @@ class BaselineUpdater:
     
     def check_for_updates(self) -> Tuple[bool, List[BaselineUpdate]]:
         """Check all sources for updates."""
-        print("🔍 Checking for baseline updates...")
+        print("🔍 Checking for baseline updates...", file=sys.stderr)
         
         updates = self.source_manager.check_all_sources()
         
         if updates:
-            print(f"✅ Found {len(updates)} potential updates")
+            print(f"✅ Found {len(updates)} potential updates", file=sys.stderr)
             return True, updates
         else:
-            print("✅ No baseline updates detected")
+            print("✅ No baseline updates detected", file=sys.stderr)
             return False, []
     
     def apply_updates(self, updates: List[BaselineUpdate]) -> bool:
@@ -273,7 +273,7 @@ class BaselineUpdater:
         if not updates:
             return False
         
-        print(f"📝 Applying {len(updates)} baseline updates...")
+        print(f"📝 Applying {len(updates)} baseline updates...", file=sys.stderr)
         
         # In a real implementation, we would:
         # 1. Update the PUBLISHED_BASELINES in generate-comparison.py
@@ -285,7 +285,7 @@ class BaselineUpdater:
         for update in updates:
             print(f"  {update.proxy_name}: {update.metric_name} "
                   f"{update.old_value} → {update.new_value} "
-                  f"(source: {update.source}, confidence: {update.confidence:.2f})")
+                  f"(source: {update.source}, confidence: {update.confidence:.2f})", file=sys.stderr)
         
         return True
     
@@ -323,7 +323,7 @@ def main():
     # Check for updates
     has_updates, updates = updater.check_for_updates()
     
-    # Generate output for GitHub Actions
+    # Generate output for GitHub Actions (only key=value pairs)
     print(f"updated={str(has_updates).lower()}")
     
     if has_updates:
@@ -333,15 +333,10 @@ def main():
         # Apply updates if requested
         if '--apply' in sys.argv:
             success = updater.apply_updates(updates)
-            if success:
-                print("✅ Baseline updates applied successfully")
-            else:
-                print("❌ Failed to apply baseline updates")
+            if not success:
                 sys.exit(1)
     else:
         print("changes=No baseline changes detected")
-    
-    print("✅ Baseline update check completed")
 
 if __name__ == "__main__":
     main()
