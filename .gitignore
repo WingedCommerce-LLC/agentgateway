@@ -102,3 +102,4 @@ workspace.code-workspace
 *.orig
 
 .venv
+memory-bank/
