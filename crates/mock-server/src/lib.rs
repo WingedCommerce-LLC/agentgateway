@@ -27,7 +27,7 @@ impl Server {
 	}
 
 	pub async fn run_with_port(port: u16) -> Self {
-		let listener = TcpListener::bind(("127.0.0.1", port))
+		let listener = TcpListener::bind(("0.0.0.0", port))
 			.await
 			.expect("Failed to bind");
 		let address = listener.local_addr().expect("Failed to get local addr");
