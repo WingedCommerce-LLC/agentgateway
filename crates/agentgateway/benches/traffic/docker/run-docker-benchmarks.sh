@@ -247,12 +247,12 @@ run_benchmarks() {
     
     # Run benchmarks in Docker
     if [ "$VERBOSE" = true ]; then
-        docker-compose -f docker-compose.benchmark.yml run --rm \
+        docker-compose -f docker-compose.benchmark.yml --profile benchmark run --rm \
             -e AGENTGATEWAY_URL=http://agentgateway:8080 \
             -e BACKEND_URL=http://test-server:3001 \
             fortio-benchmark $benchmark_cmd
     else
-        docker-compose -f docker-compose.benchmark.yml run --rm \
+        docker-compose -f docker-compose.benchmark.yml --profile benchmark run --rm \
             -e AGENTGATEWAY_URL=http://agentgateway:8080 \
             -e BACKEND_URL=http://test-server:3001 \
             fortio-benchmark $benchmark_cmd > /dev/null 2>&1
@@ -282,9 +282,9 @@ generate_reports() {
     
     # Generate reports
     if [ "$VERBOSE" = true ]; then
-        docker-compose -f docker-compose.benchmark.yml run --rm report-generator
+        docker-compose -f docker-compose.benchmark.yml --profile reports run --rm report-generator
     else
-        docker-compose -f docker-compose.benchmark.yml run --rm report-generator > /dev/null 2>&1
+        docker-compose -f docker-compose.benchmark.yml --profile reports run --rm report-generator > /dev/null 2>&1
     fi
     
     local exit_code=$?
