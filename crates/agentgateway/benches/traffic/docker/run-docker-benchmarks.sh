@@ -199,10 +199,21 @@ start_infrastructure() {
     cd "$SCRIPT_DIR"
     
     # Start AgentGateway and test server
-    if [ "$VERBOSE" = true ]; then
-        docker-compose -f docker-compose.benchmark.yml up -d agentgateway test-server
+    # Try modern docker compose first, then fall back to docker-compose
+    if command -v docker &> /dev/null && docker compose version &> /dev/null 2>&1; then
+        # Use modern docker compose
+        if [ "$VERBOSE" = true ]; then
+            docker compose -f docker-compose.benchmark.yml up -d agentgateway test-server
+        else
+            docker compose -f docker-compose.benchmark.yml up -d agentgateway test-server > /dev/null 2>&1
+        fi
     else
-        docker-compose -f docker-compose.benchmark.yml up -d agentgateway test-server > /dev/null 2>&1
+        # Fall back to legacy docker-compose
+        if [ "$VERBOSE" = true ]; then
+            docker-compose -f docker-compose.benchmark.yml up -d agentgateway test-server
+        else
+            docker-compose -f docker-compose.benchmark.yml up -d agentgateway test-server > /dev/null 2>&1
+        fi
     fi
     
     # Wait for services to be healthy
@@ -211,11 +222,24 @@ start_infrastructure() {
     local wait_time=0
     
     while [ $wait_time -lt $max_wait ]; do
-        if docker-compose -f docker-compose.benchmark.yml ps | grep -q "healthy"; then
-            local healthy_count=$(docker-compose -f docker-compose.benchmark.yml ps | grep -c "healthy" || true)
-            if [ "$healthy_count" -ge 2 ]; then
-                log_success "All services are healthy"
-                return 0
+        # Check health status using appropriate docker compose command
+        if command -v docker &> /dev/null && docker compose version &> /dev/null 2>&1; then
+            # Use modern docker compose
+            if docker compose -f docker-compose.benchmark.yml ps | grep -q "healthy"; then
+                local healthy_count=$(docker compose -f docker-compose.benchmark.yml ps | grep -c "healthy" || true)
+                if [ "$healthy_count" -ge 2 ]; then
+                    log_success "All services are healthy"
+                    return 0
+                fi
+            fi
+        else
+            # Fall back to legacy docker-compose
+            if docker-compose -f docker-compose.benchmark.yml ps | grep -q "healthy"; then
+                local healthy_count=$(docker-compose -f docker-compose.benchmark.yml ps | grep -c "healthy" || true)
+                if [ "$healthy_count" -ge 2 ]; then
+                    log_success "All services are healthy"
+                    return 0
+                fi
             fi
         fi
         
@@ -228,7 +252,12 @@ start_infrastructure() {
     done
     
     log_error "Services failed to become healthy within ${max_wait} seconds"
-    docker-compose -f docker-compose.benchmark.yml logs
+    # Show logs using appropriate docker compose command
+    if command -v docker &> /dev/null && docker compose version &> /dev/null 2>&1; then
+        docker compose -f docker-compose.benchmark.yml logs
+    else
+        docker-compose -f docker-compose.benchmark.yml logs
+    fi
     return 1
 }
 
@@ -345,10 +374,21 @@ cleanup() {
     
     cd "$SCRIPT_DIR"
     
-    if [ "$VERBOSE" = true ]; then
-        docker-compose -f docker-compose.benchmark.yml down
+    # Use appropriate docker compose command for cleanup
+    if command -v docker &> /dev/null && docker compose version &> /dev/null 2>&1; then
+        # Use modern docker compose
+        if [ "$VERBOSE" = true ]; then
+            docker compose -f docker-compose.benchmark.yml down
+        else
+            docker compose -f docker-compose.benchmark.yml down > /dev/null 2>&1
+        fi
     else
-        docker-compose -f docker-compose.benchmark.yml down > /dev/null 2>&1
+        # Fall back to legacy docker-compose
+        if [ "$VERBOSE" = true ]; then
+            docker-compose -f docker-compose.benchmark.yml down
+        else
+            docker-compose -f docker-compose.benchmark.yml down > /dev/null 2>&1
+        fi
     fi
     
     log_success "Cleanup completed"
