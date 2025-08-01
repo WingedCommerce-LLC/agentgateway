@@ -246,16 +246,33 @@ run_benchmarks() {
     fi
     
     # Run benchmarks in Docker
-    if [ "$VERBOSE" = true ]; then
-        docker-compose -f docker-compose.benchmark.yml --profile benchmark run --rm \
-            -e AGENTGATEWAY_URL=http://agentgateway:8080 \
-            -e BACKEND_URL=http://test-server:3001 \
-            fortio-benchmark $benchmark_cmd
+    # Try modern docker compose first, then fall back to docker-compose
+    if command -v docker &> /dev/null && docker compose version &> /dev/null 2>&1; then
+        # Use modern docker compose
+        if [ "$VERBOSE" = true ]; then
+            docker compose -f docker-compose.benchmark.yml --profile benchmark run --rm \
+                -e AGENTGATEWAY_URL=http://agentgateway:8080 \
+                -e BACKEND_URL=http://test-server:3001 \
+                fortio-benchmark $benchmark_cmd
+        else
+            docker compose -f docker-compose.benchmark.yml --profile benchmark run --rm \
+                -e AGENTGATEWAY_URL=http://agentgateway:8080 \
+                -e BACKEND_URL=http://test-server:3001 \
+                fortio-benchmark $benchmark_cmd > /dev/null 2>&1
+        fi
     else
-        docker-compose -f docker-compose.benchmark.yml --profile benchmark run --rm \
-            -e AGENTGATEWAY_URL=http://agentgateway:8080 \
-            -e BACKEND_URL=http://test-server:3001 \
-            fortio-benchmark $benchmark_cmd > /dev/null 2>&1
+        # Fall back to legacy docker-compose (may not support profiles)
+        if [ "$VERBOSE" = true ]; then
+            COMPOSE_PROFILES=benchmark docker-compose -f docker-compose.benchmark.yml run --rm \
+                -e AGENTGATEWAY_URL=http://agentgateway:8080 \
+                -e BACKEND_URL=http://test-server:3001 \
+                fortio-benchmark $benchmark_cmd
+        else
+            COMPOSE_PROFILES=benchmark docker-compose -f docker-compose.benchmark.yml run --rm \
+                -e AGENTGATEWAY_URL=http://agentgateway:8080 \
+                -e BACKEND_URL=http://test-server:3001 \
+                fortio-benchmark $benchmark_cmd > /dev/null 2>&1
+        fi
     fi
     
     local exit_code=$?
@@ -281,10 +298,21 @@ generate_reports() {
     fi
     
     # Generate reports
-    if [ "$VERBOSE" = true ]; then
-        docker-compose -f docker-compose.benchmark.yml --profile reports run --rm report-generator
+    # Try modern docker compose first, then fall back to docker-compose
+    if command -v docker &> /dev/null && docker compose version &> /dev/null 2>&1; then
+        # Use modern docker compose
+        if [ "$VERBOSE" = true ]; then
+            docker compose -f docker-compose.benchmark.yml --profile reports run --rm report-generator
+        else
+            docker compose -f docker-compose.benchmark.yml --profile reports run --rm report-generator > /dev/null 2>&1
+        fi
     else
-        docker-compose -f docker-compose.benchmark.yml --profile reports run --rm report-generator > /dev/null 2>&1
+        # Fall back to legacy docker-compose (may not support profiles)
+        if [ "$VERBOSE" = true ]; then
+            COMPOSE_PROFILES=reports docker-compose -f docker-compose.benchmark.yml run --rm report-generator
+        else
+            COMPOSE_PROFILES=reports docker-compose -f docker-compose.benchmark.yml run --rm report-generator > /dev/null 2>&1
+        fi
     fi
     
     local exit_code=$?
