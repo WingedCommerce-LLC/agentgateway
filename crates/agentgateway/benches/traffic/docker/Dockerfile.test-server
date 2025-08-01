@@ -13,8 +13,8 @@ WORKDIR /app
 # Copy the entire project
 COPY . .
 
-# Build the test server
-RUN cargo build --release --bin test-server
+# Build the mock server
+RUN cargo build --release --bin mock-server
 
 FROM debian:bookworm-slim
 
@@ -24,8 +24,8 @@ RUN apt-get update && apt-get install -y \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy the test server binary
-COPY --from=builder /app/target/release/test-server /usr/local/bin/test-server
+# Copy the mock server binary
+COPY --from=builder /app/target/release/mock-server /usr/local/bin/mock-server
 
 # Create a non-root user
 RUN useradd -r -s /bin/false testserver
@@ -40,5 +40,8 @@ EXPOSE 3001
 HEALTHCHECK --interval=5s --timeout=3s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:3001/health || exit 1
 
+# Set the port environment variable
+ENV PORT=3001
+
 # Default command
-CMD ["/usr/local/bin/test-server", "--port", "3001"]
+CMD ["/usr/local/bin/mock-server"]

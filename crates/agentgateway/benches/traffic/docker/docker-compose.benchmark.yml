@@ -27,11 +27,8 @@ services:
       dockerfile: crates/agentgateway/benches/traffic/docker/Dockerfile.test-server
     ports:
       - "3001:3001"
-    command: >
-      sh -c "
-        echo 'Starting test backend server...' &&
-        /usr/local/bin/test-server 0.0.0.0:3001
-      "
+    environment:
+      - PORT=3001
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:3001/health"]
       interval: 5s
