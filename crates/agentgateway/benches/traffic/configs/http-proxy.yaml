@@ -4,6 +4,21 @@ binds:
   listeners:
   - protocol: HTTP
     routes:
+    # MCP protocol endpoint
+    - name: "mcp-route"
+      matches:
+      - path:
+          pathPrefix: /mcp
+      backends:
+      - host: test-server:3001
+    # A2A protocol endpoint  
+    - name: "a2a-route"
+      matches:
+      - path:
+          pathPrefix: /a2a
+      backends:
+      - host: test-server:3001
+    # HTTP benchmark endpoint (catch-all for /test and other paths)
     - name: "benchmark-route"
       matches:
       - path:

@@ -33,7 +33,13 @@ impl Server {
 		let address = listener.local_addr().expect("Failed to get local addr");
 		let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
 
-		let app = Router::new().route("/echo", axum::routing::any(echo_handler));
+		let app = Router::new()
+			.route("/echo", axum::routing::any(echo_handler))
+			.route("/test", axum::routing::any(echo_handler))
+			.route("/health", axum::routing::get(health_handler))
+			.route("/mcp", axum::routing::any(echo_handler))
+			.route("/a2a", axum::routing::any(echo_handler))
+			.fallback(echo_handler);
 		let server = async move {
 			axum::serve(listener, app)
 				.with_graceful_shutdown(async move {
@@ -64,6 +70,10 @@ impl Server {
 	pub async fn wait_for_shutdown(self) {
 		let _ = self.handle.await;
 	}
+}
+
+async fn health_handler() -> &'static str {
+	"OK"
 }
 
 async fn echo_handler(
