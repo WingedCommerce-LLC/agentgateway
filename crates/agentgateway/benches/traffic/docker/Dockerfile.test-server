@@ -14,7 +14,7 @@ WORKDIR /app
 COPY . .
 
 # Build the mock server
-RUN cargo build --release --bin mock-server
+RUN cargo build --release --package mock-server --bin mock-server
 
 FROM debian:bookworm-slim
 
