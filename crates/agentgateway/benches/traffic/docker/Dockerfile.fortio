@@ -26,12 +26,14 @@ WORKDIR /benchmarks
 
 # Copy benchmark scripts and configs
 COPY fortio-tests.sh /benchmarks/
+COPY docker-fortio-tests.sh /benchmarks/
 COPY configs/ /benchmarks/configs/
 COPY payloads/ /benchmarks/payloads/
 COPY reports/ /benchmarks/reports/
 
 # Make scripts executable
 RUN chmod +x /benchmarks/fortio-tests.sh
+RUN chmod +x /benchmarks/docker-fortio-tests.sh
 RUN chmod +x /benchmarks/reports/generate-comparison.py
 
 # Create results directory

@@ -239,8 +239,8 @@ run_benchmarks() {
     
     cd "$SCRIPT_DIR"
     
-    # Prepare benchmark command
-    local benchmark_cmd="./fortio-tests.sh --protocols $PROTOCOLS --type $TEST_TYPE --duration $DURATION"
+    # Prepare benchmark command using Docker-specific script
+    local benchmark_cmd="./docker-fortio-tests.sh --protocols $PROTOCOLS --type $TEST_TYPE --duration $DURATION"
     if [ "$VERBOSE" = true ]; then
         benchmark_cmd="$benchmark_cmd --verbose"
     fi
